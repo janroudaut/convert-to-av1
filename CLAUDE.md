@@ -18,7 +18,6 @@ ffmpeg (with libsvtav1), ffprobe, python3, bc, numfmt, stat, mktemp
 
 ## Architecture
 - `convert-to-av1.sh` — main script (all logic in one file)
-- `legacy/` — previous version (v2) kept for reference
 - Output is always MKV container
 
 ## Gotchas

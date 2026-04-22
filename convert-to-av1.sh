@@ -101,8 +101,8 @@ format_duration() {
 parse_size() {
     local input="$1"
     local num unit
-    num=$(echo "$input" | grep -oP '^[0-9]+(\.[0-9]+)?')
-    unit=$(echo "$input" | grep -oP '[A-Za-z]+$')
+    num=$(echo "$input" | grep -oP '^[0-9]+(\.[0-9]+)?' || true)
+    unit=$(echo "$input" | grep -oP '[A-Za-z]+$' || true)
     case "${unit^^}" in
         K|KB|KIB) echo $(( ${num%.*} * 1024 )) ;;
         M|MB|MIB) echo $(( ${num%.*} * 1024 * 1024 )) ;;
@@ -154,7 +154,7 @@ is_mpeg_ts() {
 get_video_height() {
     local h
     h=$(ffprobe -v error -select_streams v:0 \
-        -show_entries stream=height -of csv=p=0 "$1" 2>/dev/null | head -1 || echo "0")
+        -show_entries stream=height -of csv=p=0 "$1" 2>/dev/null | head -1) || h="0"
     # Strip commas, carriage returns, newlines, whitespace — keep only digits
     h=$(echo "$h" | tr -cd '0-9')
     echo "${h:-0}"
@@ -464,7 +464,9 @@ check_dependencies_verbose() {
 
     # Check for SVT-AV1 encoder support in ffmpeg
     echo ""
-    if grep -q libsvtav1 <(ffmpeg -encoders 2>/dev/null); then
+    local encoders
+    encoders=$(ffmpeg -encoders 2>/dev/null || true)
+    if echo "$encoders" | grep -q libsvtav1; then
         echo "  libsvtav1  OK    (SVT-AV1 encoder available)"
     else
         echo "  libsvtav1  MISSING (ffmpeg was built without SVT-AV1 support)"
@@ -1198,10 +1200,10 @@ convert_file() {
     pid_file=$(mktemp "${TMPDIR:-/tmp}/convert-${$}-pid-XXXXXX") || true
     abort_signal=$(mktemp -u "${TMPDIR:-/tmp}/convert-${$}-abort-XXXXXX")
 
+    local ffmpeg_exit=0
     { "${cmd[@]}" 2>"$stderr_log" & echo $! > "$pid_file"; wait $!; } \
         | run_progress_monitor "$duration" "$start_time" "$temp_output" "$input_size" "$pid_file" "$abort_signal" \
-        || true
-    local ffmpeg_exit=${PIPESTATUS[0]}
+        || ffmpeg_exit="${PIPESTATUS[0]}"
 
     # Read ffmpeg PID from file (for cleanup trap)
     CURRENT_FFMPEG_PID=$(cat "$pid_file" 2>/dev/null || echo "")

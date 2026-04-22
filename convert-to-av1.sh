@@ -1248,7 +1248,18 @@ post_process() {
 
     if [[ "$output_size" -eq 0 ]]; then
         warn "Output file empty or missing: $final_output"
+        rm -f "$final_output"
         add_result "$input_file" "FAILED" "$input_size" 0 "empty output"
+        return 0
+    fi
+
+    # A valid video file must be larger than just a container header.
+    # MKV headers alone are ~200-350 bytes — treat anything under 1 KiB as corrupt.
+    local min_output_size=1024
+    if [[ "$output_size" -lt "$min_output_size" ]]; then
+        warn "Output too small (${output_size} bytes), likely corrupt: $final_output"
+        rm -f "$final_output"
+        add_result "$input_file" "FAILED" "$input_size" 0 "corrupt output (${output_size} bytes)"
         return 0
     fi
 

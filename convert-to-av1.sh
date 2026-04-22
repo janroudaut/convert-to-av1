@@ -50,6 +50,7 @@ CURRENT_LOCK_FILE=""
 CURRENT_STDERR_LOG=""
 CURRENT_FFMPEG_PID=""
 EARLY_ABORTED=false
+SKIP_REQUESTED=false
 SUMMARY_FILES=()
 SUMMARY_STATUSES=()
 SUMMARY_INPUT_SIZES=()
@@ -367,6 +368,9 @@ release_lock() {
 
 cleanup() {
     local exit_code=$?
+
+    # Restore terminal settings (in case we were interrupted during conversion)
+    stty sane < /dev/tty 2>/dev/null || true
 
     # On interrupt, print a newline to clear the progress bar
     if [[ "$exit_code" -ne 0 ]]; then
@@ -1016,6 +1020,7 @@ run_progress_monitor() {
                             ffmpeg_pid=$(cat "$pid_file" 2>/dev/null || echo "")
                             if [[ -n "$ffmpeg_pid" ]]; then kill "$ffmpeg_pid" 2>/dev/null || true; fi
                         fi
+
                         return 0
                     fi
                 fi
@@ -1189,29 +1194,71 @@ convert_file() {
 
     CURRENT_TEMP_FILE="$temp_output"
     EARLY_ABORTED=false
+    SKIP_REQUESTED=false
 
     local stderr_log=""
     stderr_log=$(mktemp "${TMPDIR:-/tmp}/convert-${$}-stderr-XXXXXX.log") || true
     CURRENT_STDERR_LOG="$stderr_log"
 
     # Run ffmpeg piped to progress monitor.
-    # Use temp files for PID tracking and abort signaling (subshell can't set parent vars).
-    local pid_file="" abort_signal=""
+    # Use temp files for PID tracking and abort/skip signaling (subshell can't set parent vars).
+    local pid_file="" abort_signal="" skip_signal=""
     pid_file=$(mktemp "${TMPDIR:-/tmp}/convert-${$}-pid-XXXXXX") || true
     abort_signal=$(mktemp -u "${TMPDIR:-/tmp}/convert-${$}-abort-XXXXXX")
+    skip_signal=$(mktemp -u "${TMPDIR:-/tmp}/convert-${$}-skip-XXXXXX")
+
+    # Start background key reader for skip support (main shell, not in pipe subshell)
+    local key_reader_pid=""
+    if [[ -t 2 ]] && ! $no_progress; then
+        local tty_saved
+        tty_saved=$(stty -g < /dev/tty 2>/dev/null || true)
+        stty -icanon -echo < /dev/tty 2>/dev/null || true
+        (
+            trap 'exit 0' TERM
+            while true; do
+                local ch=""
+                if IFS= read -rsn1 ch < /dev/tty 2>/dev/null; then
+                    if [[ "$ch" == ">" ]]; then
+                        touch "$skip_signal"
+                        # Kill ffmpeg
+                        local fpid
+                        fpid=$(cat "$pid_file" 2>/dev/null || echo "")
+                        if [[ -n "$fpid" ]]; then kill "$fpid" 2>/dev/null || true; fi
+                        exit 0
+                    fi
+                fi
+            done
+        ) &
+        key_reader_pid=$!
+    fi
 
     local ffmpeg_exit=0
     { "${cmd[@]}" 2>"$stderr_log" & echo $! > "$pid_file"; wait $!; } \
         | run_progress_monitor "$duration" "$start_time" "$temp_output" "$input_size" "$pid_file" "$abort_signal" \
         || ffmpeg_exit="${PIPESTATUS[0]}"
 
+    # Stop key reader and restore terminal
+    if [[ -n "$key_reader_pid" ]]; then
+        kill "$key_reader_pid" 2>/dev/null || true
+        wait "$key_reader_pid" 2>/dev/null || true
+        stty "$tty_saved" < /dev/tty 2>/dev/null || true
+    fi
+
     # Read ffmpeg PID from file (for cleanup trap)
     CURRENT_FFMPEG_PID=$(cat "$pid_file" 2>/dev/null || echo "")
 
-    # Check if early abort was signaled from the subshell
+    # Check if early abort or skip was signaled
     if [[ -f "$abort_signal" ]]; then
         EARLY_ABORTED=true
         rm -f "$abort_signal"
+    fi
+    if [[ -f "$skip_signal" ]]; then
+        SKIP_REQUESTED=true
+        rm -f "$skip_signal"
+        if ! $no_progress; then
+            printf "\r%-80s\r" " "
+        fi
+        info "  Skipped by user."
     fi
     rm -f "$pid_file"
 
@@ -1269,6 +1316,14 @@ post_process() {
         fi
 
         add_result "$input_file" "ABORTED" "$input_size" 0 "estimated output larger"
+        return 0
+    fi
+
+    # User skip case
+    if $SKIP_REQUESTED; then
+        rm -f "$temp_output"
+        CURRENT_TEMP_FILE=""
+        add_result "$input_file" "SKIPPED" "$input_size" 0 "skipped by user"
         return 0
     fi
 
@@ -1562,6 +1617,9 @@ print_banner() {
     [[ -n "$after_cmd" ]] && banner_line "after" "$after_cmd"
 
     echo -e "${GRAY}${sep}${NC}"
+    if [[ -t 2 ]] && ! $no_progress; then
+        echo -e "${GRAY}  Press > to skip the current file${NC}"
+    fi
 }
 
 # ==============================================================================

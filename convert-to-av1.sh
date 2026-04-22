@@ -43,6 +43,9 @@ audio_bitrate_threshold=200  # kb/s — auto mode re-encodes above this
 min_size=0  # bytes — skip files smaller than this
 exclude_patterns=()
 after_cmd=""
+quality_check=false
+quality_min_ssim=0.92  # minimum acceptable SSIM (0-1 scale)
+quality_sample_secs=10 # seconds per sample segment for quality check
 
 # -- Global state (for cleanup) ------------------------------------------------
 CURRENT_TEMP_FILE=""
@@ -508,8 +511,10 @@ QUALITY:
   --max-res, --max-h HEIGHT     Scale down to HEIGHT px if source is taller
   --1080, --1080p               Alias for --max-res 1080
   --720, --720p                 Alias for --max-res 720
-  --sd, --fast                  Fast encoding (preset 10, crf 32, tune VQ)
+  --sd, --fast                  Fast encoding (preset 10, crf 32, film-grain 4)
   --hq                          High quality (preset 4, crf 28, 10-bit, film-grain 8)
+  --quality-check               SSIM check after conversion; reject if below threshold
+  --min-ssim VALUE              Minimum SSIM score 0-1 (default: 0.92)
 
 BATCH:
   --sort-by-size [asc|desc]     Sort files by size before processing (default: desc)
@@ -584,12 +589,21 @@ parse_args() {
                 shift
                 ;;
             --sd|--fast)
-                svtav1_options="-preset 10 -crf 32 -svtav1-params tune=0"
+                svtav1_options="-preset 10 -crf 32 -pix_fmt yuv420p10le -svtav1-params tune=0:film-grain=4:enable-overlays=1:scd=1"
                 shift
                 ;;
             --hq)
                 svtav1_options="-preset 4 -crf 28 -pix_fmt yuv420p10le -svtav1-params tune=0:film-grain=8:enable-overlays=1:scd=1"
                 shift
+                ;;
+            --quality-check)
+                quality_check=true
+                shift
+                ;;
+            --min-ssim)
+                quality_check=true
+                quality_min_ssim="$2"
+                shift 2
                 ;;
             -y|--overwrite)
                 overwrite="-y"
@@ -1285,6 +1299,61 @@ convert_file() {
 }
 
 # ==============================================================================
+# Quality check (SSIM sampling)
+# ==============================================================================
+
+# Compute SSIM between source and output using sampled segments.
+# Samples 3 segments (10s each at 10%, 50%, 90% of the duration) for speed.
+# Returns the mean SSIM on stdout, or "N/A" on failure.
+compute_ssim_sampled() {
+    local source="$1"
+    local output="$2"
+
+    local dur
+    dur=$(get_duration_secs "$source")
+    if [[ "$dur" -lt 10 ]]; then
+        # Short file: compare the whole thing
+        local result
+        result=$(ffmpeg -hide_banner -i "$source" -i "$output" \
+            -filter_complex "ssim" -f null /dev/null 2>&1 \
+            | grep -oP 'All:\K[0-9.]+' | tail -1) || true
+        echo "${result:-N/A}"
+        return
+    fi
+
+    # Sample at 10%, 50%, 90% of duration
+    local positions=()
+    positions+=( $(( dur * 10 / 100 )) )
+    positions+=( $(( dur * 50 / 100 )) )
+    positions+=( $(( dur * 90 / 100 )) )
+
+    local total=0 count=0
+    for pos in "${positions[@]}"; do
+        local ssim_val
+        ssim_val=$(ffmpeg -hide_banner \
+            -ss "$pos" -t "$quality_sample_secs" -i "$source" \
+            -ss "$pos" -t "$quality_sample_secs" -i "$output" \
+            -filter_complex "ssim" -f null /dev/null 2>&1 \
+            | grep -oP 'All:\K[0-9.]+' | tail -1) || true
+        if [[ -n "$ssim_val" && "$ssim_val" != "0" ]]; then
+            total=$(echo "$total + $ssim_val" | bc -l)
+            count=$((count + 1))
+        fi
+    done
+
+    if [[ "$count" -eq 0 ]]; then
+        echo "N/A"
+        return
+    fi
+
+    local mean
+    mean=$(echo "scale=6; $total / $count" | bc -l)
+    # bc omits leading zero
+    [[ "$mean" == .* ]] && mean="0${mean}"
+    echo "$mean"
+}
+
+# ==============================================================================
 # Post-processing
 # ==============================================================================
 
@@ -1368,6 +1437,26 @@ post_process() {
         rm -f "$final_output"
         add_result "$input_file" "FAILED" "$input_size" 0 "corrupt output (${output_size} bytes)"
         return 0
+    fi
+
+    # Quality check (SSIM sampling)
+    if $quality_check && [[ -f "$input_file" ]]; then
+        info "  Quality check (SSIM sampling)..."
+        local ssim_score
+        ssim_score=$(compute_ssim_sampled "$input_file" "$final_output")
+        if [[ "$ssim_score" == "N/A" ]]; then
+            warn "Quality check failed (could not compute SSIM): $final_output"
+        else
+            local ssim_ok
+            ssim_ok=$(echo "$ssim_score >= $quality_min_ssim" | bc -l 2>/dev/null || echo "1")
+            if [[ "$ssim_ok" -eq 0 ]]; then
+                warn "Quality too low (SSIM=${ssim_score}, min=${quality_min_ssim}): $final_output"
+                rm -f "$final_output"
+                add_result "$input_file" "FAILED" "$input_size" "$output_size" "SSIM ${ssim_score} < ${quality_min_ssim}"
+                return 0
+            fi
+            info "  SSIM: ${ssim_score} (min: ${quality_min_ssim})"
+        fi
     fi
 
     # Size saved
@@ -1606,6 +1695,9 @@ print_banner() {
     if $early_abort && ($remove_if_bigger || $keep_best_version); then
         banner_line "early abort" "${early_abort_threshold}%"
     fi
+
+    # Quality check (conditional)
+    $quality_check && banner_line "quality check" "SSIM >= ${quality_min_ssim}"
 
     # Subtitles (conditional — only shown if enabled)
     $merge_subs && banner_line "subtitles" "merge .srt/.vtt"

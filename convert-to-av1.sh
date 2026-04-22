@@ -418,11 +418,12 @@ trap 'exit 130' INT TERM
 # Dependency check
 # ==============================================================================
 
+REQUIRED_DEPS=(ffmpeg ffprobe python3 numfmt stat mktemp bc)
+
 check_dependencies() {
     local missing=()
-    local deps=(ffmpeg ffprobe python3 numfmt stat mktemp bc)
 
-    for dep in "${deps[@]}"; do
+    for dep in "${REQUIRED_DEPS[@]}"; do
         if ! command -v "$dep" &>/dev/null; then
             missing+=("$dep")
         fi
@@ -433,6 +434,50 @@ check_dependencies() {
     fi
 
     debug "ffmpeg: $(ffmpeg -version | head -1)"
+}
+
+# Verbose dependency check for --check flag
+check_dependencies_verbose() {
+    local all_ok=true
+
+    echo "convert-to-av1 v$VERSION — dependency check"
+    echo ""
+
+    for dep in "${REQUIRED_DEPS[@]}"; do
+        local path version_info
+        if path=$(command -v "$dep" 2>/dev/null); then
+            version_info=""
+            case "$dep" in
+                ffmpeg)  version_info=$(ffmpeg -version 2>/dev/null | head -1) ;;
+                ffprobe) version_info=$(ffprobe -version 2>/dev/null | head -1) ;;
+                python3) version_info=$(python3 --version 2>/dev/null) ;;
+                bc)      version_info=$(bc --version 2>/dev/null | head -1) ;;
+            esac
+            printf "  %-10s OK    %s" "$dep" "$path"
+            [[ -n "$version_info" ]] && printf "  (%s)" "$version_info"
+            printf "\n"
+        else
+            printf "  %-10s MISSING\n" "$dep"
+            all_ok=false
+        fi
+    done
+
+    # Check for SVT-AV1 encoder support in ffmpeg
+    echo ""
+    if grep -q libsvtav1 <(ffmpeg -encoders 2>/dev/null); then
+        echo "  libsvtav1  OK    (SVT-AV1 encoder available)"
+    else
+        echo "  libsvtav1  MISSING (ffmpeg was built without SVT-AV1 support)"
+        all_ok=false
+    fi
+
+    echo ""
+    if $all_ok; then
+        echo "All dependencies satisfied."
+    else
+        echo "Some dependencies are missing. Install them before running conversions."
+        exit 1
+    fi
 }
 
 # ==============================================================================
@@ -484,6 +529,7 @@ LOGGING:
   --no-progress                 Disable progress bar
 
 OTHER:
+  --check                        Check dependencies and exit
   -h, --help                    Show this help
   --version                     Show version
 USAGE
@@ -608,6 +654,10 @@ parse_args() {
             --no-progress)
                 no_progress=true
                 shift
+                ;;
+            --check)
+                check_dependencies_verbose
+                exit 0
                 ;;
             -h|--help)
                 usage

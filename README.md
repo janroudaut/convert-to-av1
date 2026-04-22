@@ -10,20 +10,31 @@ Batch video converter to AV1 using FFmpeg and SVT-AV1. Designed to reduce storag
 - **Early abort** — stops encoding at ~8% if the output is estimated to be larger than the source
 - **Subtitle merging** — auto-detects adjacent `.srt`/`.vtt` files (including multi-language) and muxes them into the output MKV
 - **Description embedding** — reads adjacent `.txt` files and embeds them as MKV `description` metadata
+- **Audio re-encoding** — optional Opus re-encoding with automatic bitrate detection
+- **Resolution scaling** — downscale to 1080p, 720p, or any custom height
 - **Recursive mode** — process entire directory trees
 - **Sort by size** — process smallest (or largest) files first
+- **File filtering** — skip files below a minimum size, exclude by glob pattern
 - **Clean progress bar** — real-time progress with speed, ETA, and fps
 - **Detailed file info** — shows container, duration, bitrate, streams, and detected external files before each conversion
 - **Graceful failures** — one failed file doesn't stop the batch; summary table at the end
 - **Lock files** — prevents concurrent conversion of the same file
+- **Post-batch command** — run a custom command after the batch completes
 - **NO_COLOR support** — respects the [NO_COLOR](https://no-color.org/) standard
 - **Dry run mode** — preview what would happen without converting
+- **Dependency check** — verify all required tools are installed with `--check`
 
 ## Requirements
 
 - `ffmpeg` and `ffprobe` (with `libsvtav1` support)
 - `python3` (for file info display)
 - Standard GNU utils: `bc`, `numfmt`, `stat`, `mktemp`
+
+Verify your setup:
+
+```bash
+./convert-to-av1.sh --check
+```
 
 ## Quick start
 
@@ -42,6 +53,12 @@ Batch video converter to AV1 using FFmpeg and SVT-AV1. Designed to reduce storag
 
 # Convert to a separate output directory
 ./convert-to-av1.sh -o /path/to/output/ *.ts
+
+# Fast encoding for quick results
+./convert-to-av1.sh --fast .
+
+# High quality encoding
+./convert-to-av1.sh --hq .
 
 # Preview what would be done
 ./convert-to-av1.sh --dry-run --sort-by-size .
@@ -74,20 +91,33 @@ convert-to-av1 [options] FILES[...]
 | Flag | Description |
 |------|-------------|
 | `--max-res, --max-h HEIGHT` | Scale down to HEIGHT px if source is taller |
-| `--sd, --fast` | Fast encoding (SVT-AV1 preset 9, CRF 35) |
-| `--hq` | High quality (preset 5, CRF 32, 10-bit, film grain synthesis) |
+| `--1080, --1080p` | Alias for `--max-res 1080` |
+| `--720, --720p` | Alias for `--max-res 720` |
+| `--sd, --fast` | Fast encoding (preset 10, CRF 32, tune VQ) |
+| `--hq` | High quality (preset 4, CRF 28, 10-bit, film-grain 8) |
 
-Default: preset 6, CRF 30.
+Default: preset 6, CRF 30, 10-bit, film-grain 6.
 
 ### Batch
 
 | Flag | Description |
 |------|-------------|
 | `-r, --recursive` | Recurse into subdirectories |
-| `--sort-by-size [asc\|desc]` | Sort files by size before processing (default: asc) |
+| `--sort-by-size [asc\|desc]` | Sort files by size before processing (default: desc) |
+| `--min-size SIZE` | Skip files smaller than SIZE (e.g., `100M`, `1G`) |
+| `--exclude PATTERN` | Exclude files matching glob pattern (repeatable) |
 | `--dry-run` | Show what would be done without converting |
 | `--no-early-abort` | Disable early abort when output is estimated larger |
 | `--early-abort-threshold PCT` | Progress % at which to evaluate (default: 8) |
+| `--after CMD` | Run CMD after the batch completes |
+
+### Audio
+
+| Flag | Description |
+|------|-------------|
+| `--opus` | Re-encode audio to Opus (conservative bitrates) |
+| `--auto-audio` | Re-encode to Opus only if source bitrate exceeds threshold |
+| `--audio-threshold KB/S` | Bitrate threshold for `--auto-audio` (default: 200) |
 
 ### Subtitles
 
@@ -107,6 +137,14 @@ Adjacent `.txt` files are embedded as MKV `description` metadata but are **never
 | `-v, --verbose` | Verbose output |
 | `--no-progress` | Disable progress bar |
 
+### Other
+
+| Flag | Description |
+|------|-------------|
+| `--check` | Check dependencies and exit |
+| `-h, --help` | Show this help |
+| `--version` | Show version |
+
 ## How it works
 
 1. **Probe** — reads container format, streams, duration, and codec info
@@ -115,13 +153,13 @@ Adjacent `.txt` files are embedded as MKV `description` metadata but are **never
 4. **Merge** — detects and includes adjacent subtitle/description files
 5. **Encode** — runs FFmpeg with SVT-AV1, piping progress to a real-time monitor
 6. **Early abort** — at the configured threshold (default 8%), estimates final output size; aborts if it would be larger than input (only when `--smart` or `--rm-if-bigger`)
-7. **Post-process** — handles smart mode logic, source removal, in-place file swap
+7. **Post-process** — handles smart mode logic, source removal, in-place file swap; detects corrupt outputs (< 1 KiB)
 8. **Summary** — prints a table of all results with sizes and savings
 
 ## Example output
 
 ```
-<- SOURCE (2.5M): 'recording.ts'
+<- SOURCE (2.5G): 'recording.ts'
 -> TARGET: 'recording.mkv'
   container: mpegts  duration: 01:03:58  bitrate: 5281 kb/s
     #0 video: h264 1920x1080

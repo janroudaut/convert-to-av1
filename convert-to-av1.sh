@@ -28,7 +28,20 @@ remove_if_bigger=false
 keep_best_version=false
 overwrite=""
 max_res=""
-svtav1_options="-preset 6 -crf 30 -pix_fmt yuv420p10le -svtav1-params tune=0:film-grain=6:enable-overlays=1:scd=1"
+
+# -- SVT-AV1 encoding parameters (decomposed for content-type presets) ---------
+svt_preset=6
+svt_crf=30
+svt_film_grain=6
+svt_film_grain_denoise=0
+svt_tune=0
+svt_pix_fmt="yuv420p10le"
+svt_enable_overlays=1
+svt_scd=1
+content_type=""        # "", "cartoon", "tv", "movie"
+speed_preset="default" # "fast", "default", "hq"
+svtav1_options=""       # assembled by build_svtav1_options()
+
 log_file=""
 verbose=false
 dry_run=false
@@ -63,6 +76,47 @@ FILES_PROCESSED=0
 FILES_TOTAL=0
 BATCH_SAVED_BYTES=0
 BATCH_START_TIME=0
+
+# ==============================================================================
+# SVT-AV1 preset helpers
+# ==============================================================================
+
+# Apply content-type overlay on top of speed preset values
+apply_content_type() {
+    case "$content_type" in
+        cartoon)
+            svt_film_grain=0
+            svt_film_grain_denoise=0
+            svt_crf=$(( svt_crf + 2 ))
+            ;;
+        tv)
+            svt_crf=$(( svt_crf + 1 ))
+            case "$speed_preset" in
+                fast)    svt_film_grain=4 ;;
+                default) svt_film_grain=5 ;;
+                hq)      svt_film_grain=6 ;;
+            esac
+            ;;
+        movie)
+            svt_film_grain_denoise=1
+            svt_crf=$(( svt_crf - 2 ))
+            case "$speed_preset" in
+                fast)    svt_film_grain=8 ;;
+                default) svt_film_grain=10 ;;
+                hq)      svt_film_grain=10 ;;
+            esac
+            ;;
+    esac
+}
+
+# Assemble decomposed variables into the svtav1_options string
+build_svtav1_options() {
+    local params="tune=${svt_tune}:film-grain=${svt_film_grain}:enable-overlays=${svt_enable_overlays}:scd=${svt_scd}"
+    if [[ "$svt_film_grain_denoise" -eq 1 ]]; then
+        params+=":film-grain-denoise=1"
+    fi
+    svtav1_options="-preset ${svt_preset} -crf ${svt_crf} -pix_fmt ${svt_pix_fmt} -svtav1-params ${params}"
+}
 
 # ==============================================================================
 # Utility functions
@@ -513,6 +567,9 @@ QUALITY:
   --720, --720p                 Alias for --max-res 720
   --sd, --fast                  Fast encoding (preset 10, crf 32, film-grain 4)
   --hq                          High quality (preset 4, crf 28, 10-bit, film-grain 8)
+  --cartoon                     Optimised for animation (no grain, higher CRF)
+  --tv                          Optimised for TV/broadcasts (moderate grain, higher CRF)
+  --movie                       Optimised for cinema (preserve grain, lower CRF)
   --quality-check               SSIM check after conversion; reject if below threshold
   --min-ssim VALUE              Minimum SSIM score 0-1 (default: 0.92)
 
@@ -589,11 +646,25 @@ parse_args() {
                 shift
                 ;;
             --sd|--fast)
-                svtav1_options="-preset 10 -crf 32 -pix_fmt yuv420p10le -svtav1-params tune=0:film-grain=4:enable-overlays=1:scd=1"
+                svt_preset=10; svt_crf=32; svt_film_grain=4
+                speed_preset="fast"
                 shift
                 ;;
             --hq)
-                svtav1_options="-preset 4 -crf 28 -pix_fmt yuv420p10le -svtav1-params tune=0:film-grain=8:enable-overlays=1:scd=1"
+                svt_preset=4; svt_crf=28; svt_film_grain=8
+                speed_preset="hq"
+                shift
+                ;;
+            --cartoon)
+                content_type="cartoon"
+                shift
+                ;;
+            --tv)
+                content_type="tv"
+                shift
+                ;;
+            --movie)
+                content_type="movie"
                 shift
                 ;;
             --quality-check)
@@ -1630,25 +1701,21 @@ banner_line() {
 
 # Parse svtav1_options into a human-readable string
 format_svtav1_options() {
-    local opts="$svtav1_options"
     local parts=()
 
-    local preset crf
-    preset=$(echo "$opts" | grep -oP '(?<=-preset )\S+' || true)
-    crf=$(echo "$opts" | grep -oP '(?<=-crf )\S+' || true)
-    [[ -n "$preset" ]] && parts+=("preset=${preset}")
-    [[ -n "$crf" ]] && parts+=("crf=${crf}")
-    [[ "$opts" == *"yuv420p10le"* ]] && parts+=("10-bit")
+    parts+=("preset=${svt_preset}")
+    parts+=("crf=${svt_crf}")
+    [[ "$svt_pix_fmt" == *"10le" ]] && parts+=("10-bit")
 
-    local grain
-    grain=$(echo "$opts" | grep -oP 'film-grain=\K[0-9]+' || true)
-    [[ -n "$grain" && "$grain" != "0" ]] && parts+=("grain=${grain}")
-
-    if [[ ${#parts[@]} -gt 0 ]]; then
-        echo "SVT-AV1 ${parts[*]}"
+    if [[ "$svt_film_grain" -eq 0 ]]; then
+        parts+=("grain=off")
     else
-        echo "SVT-AV1 (default)"
+        parts+=("grain=${svt_film_grain}")
     fi
+
+    [[ "$svt_film_grain_denoise" -eq 1 ]] && parts+=("denoise")
+
+    echo "SVT-AV1 ${parts[*]}"
 }
 
 print_banner() {
@@ -1666,6 +1733,7 @@ print_banner() {
 
     # Encoder
     banner_line "encoder" "$(format_svtav1_options)"
+    [[ -n "$content_type" ]] && banner_line "content" "$content_type"
 
     # Audio
     case "$audio_mode" in
@@ -1720,6 +1788,8 @@ print_banner() {
 
 main() {
     parse_args "$@"
+    apply_content_type
+    build_svtav1_options
     check_dependencies
 
     local sorted_files=()

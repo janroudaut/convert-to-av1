@@ -93,10 +93,26 @@ convert-to-av1 [options] FILES[...]
 | `--max-res, --max-h HEIGHT` | Scale down to HEIGHT px if source is taller |
 | `--1080, --1080p` | Alias for `--max-res 1080` |
 | `--720, --720p` | Alias for `--max-res 720` |
-| `--sd, --fast` | Fast encoding (preset 10, CRF 32, tune VQ) |
+| `--sd, --fast` | Fast encoding (preset 10, CRF 32, film-grain 4) |
 | `--hq` | High quality (preset 4, CRF 28, 10-bit, film-grain 8) |
+| `--cartoon` | Optimised for animation (no grain, higher CRF) |
+| `--tv` | Optimised for TV/broadcasts (moderate grain, higher CRF) |
+| `--movie` | Optimised for cinema (preserve grain, lower CRF, film-grain-denoise) |
+
+Speed presets (`--fast`, default, `--hq`) and content presets (`--cartoon`, `--tv`, `--movie`) are combinable in any order: `--fast --cartoon`, `--hq --movie`, etc.
 
 Default: preset 6, CRF 30, 10-bit, film-grain 6.
+
+#### Preset matrix
+
+| | `--fast` | default | `--hq` |
+|---|---|---|---|
+| *(none)* | p10 crf32 grain=4 | p6 crf30 grain=6 | p4 crf28 grain=8 |
+| `--cartoon` | p10 crf34 grain=off | p6 crf32 grain=off | p4 crf30 grain=off |
+| `--tv` | p10 crf33 grain=4 | p6 crf31 grain=5 | p4 crf29 grain=6 |
+| `--movie` | p10 crf30 grain=8 denoise | p6 crf28 grain=10 denoise | p4 crf26 grain=10 denoise |
+
+All presets use 10-bit encoding, enable-overlays, and scene-change detection. `--movie` enables `film-grain-denoise` to preserve and re-synthesize film grain from the source.
 
 ### Batch
 

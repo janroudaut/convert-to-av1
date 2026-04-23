@@ -427,7 +427,7 @@ cleanup() {
     local exit_code=$?
 
     # Restore terminal settings (in case we were interrupted during conversion)
-    stty sane < /dev/tty 2>/dev/null || true
+    { stty sane < /dev/tty; } 2>/dev/null || true
 
     # On interrupt, print a newline to clear the progress bar
     if [[ "$exit_code" -ne 0 ]]; then

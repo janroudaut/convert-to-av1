@@ -64,6 +64,45 @@ Verify your setup:
 ./convert-to-av1.sh --dry-run --sort-by-size .
 ```
 
+## Docker
+
+### Build
+
+```bash
+docker build -t convert-to-av1 .
+```
+
+### Run
+
+```bash
+# Convert all videos in current directory
+docker run --rm -v "$PWD:/media" --user "$(id -u):$(id -g)" convert-to-av1 .
+
+# Smart mode on a specific folder
+docker run --rm -v "/path/to/videos:/media" --user "$(id -u):$(id -g)" convert-to-av1 --smart .
+
+# Interactive mode (progress bar, skip with ">", colors)
+docker run --rm -it -v "$PWD:/media" --user "$(id -u):$(id -g)" convert-to-av1 --smart .
+
+# Check dependencies inside the container
+docker run --rm convert-to-av1 --check
+```
+
+- **`--user "$(id -u):$(id -g)"`** ensures output files are owned by your host user, not root
+- **`-it`** enables the progress bar and colors (the script auto-detects TTY)
+- **`-v`** bind-mounts the directory containing your videos to `/media`
+
+### Wrapper
+
+A convenience wrapper (`convert-to-av1-docker`) handles volume mounting, UID/GID mapping, and TTY detection automatically:
+
+```bash
+# Same usage as the native script
+./convert-to-av1-docker --smart .
+./convert-to-av1-docker --fast -r /path/to/videos/
+./convert-to-av1-docker --check
+```
+
 ## Usage
 
 ```

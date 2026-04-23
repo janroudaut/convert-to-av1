@@ -1,0 +1,31 @@
+#!/bin/sh
+# Wrapper to run convert-to-av1 inside Docker with the right volume and user mapping.
+# Mounts host directories so both absolute and relative paths work transparently.
+# Usage: ./convert-to-av1-docker [options] FILES[...]
+
+set -eu
+
+IMAGE="convert-to-av1"
+
+# Allocate a TTY only if stdin is a terminal
+TTY_FLAG=""
+if [ -t 0 ]; then
+    TTY_FLAG="-it"
+fi
+
+# Mount each top-level host directory, skipping system dirs that would shadow
+# the container's own filesystem (bin, lib, usr, etc.).
+VOLUMES=""
+for dir in /*; do
+    [ -d "$dir" ] || continue
+    case "$dir" in
+        /bin|/boot|/dev|/etc|/lib|/lib32|/lib64|/libx32|/proc|/run|/sbin|/sys|/usr|/var) ;;
+        *) VOLUMES="$VOLUMES -v $dir:$dir" ;;
+    esac
+done
+
+# shellcheck disable=SC2086
+exec docker run --rm $TTY_FLAG $VOLUMES \
+    --user "$(id -u):$(id -g)" \
+    -w "$PWD" \
+    "$IMAGE" "$@"

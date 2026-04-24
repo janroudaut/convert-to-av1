@@ -430,11 +430,24 @@ cleanup() {
         info "Interrupted — cleaning up..."
     fi
 
-    # Kill ffmpeg if still running
-    if [[ -n "$CURRENT_FFMPEG_PID" ]] && kill -0 "$CURRENT_FFMPEG_PID" 2>/dev/null; then
-        info "  Killing ffmpeg (PID $CURRENT_FFMPEG_PID)"
-        kill "$CURRENT_FFMPEG_PID" 2>/dev/null || true
-        wait "$CURRENT_FFMPEG_PID" 2>/dev/null || true
+    # Kill all child processes (ffmpeg, key reader, subshells)
+    # Use pkill to find children by parent PID — this catches ffmpeg even if
+    # CURRENT_FFMPEG_PID isn't set yet (interrupted before the pipe finished)
+    if pkill -P $$ 2>/dev/null; then
+        info "  Killed child processes"
+        wait 2>/dev/null || true
+    fi
+    # Fallback: kill ffmpeg by PID file if still running
+    local ffmpeg_pid_to_kill="$CURRENT_FFMPEG_PID"
+    if [[ -z "$ffmpeg_pid_to_kill" ]]; then
+        local pf
+        for pf in "${TMPDIR:-/tmp}/convert-${$}-pid-"*; do
+            [[ -f "$pf" ]] && ffmpeg_pid_to_kill=$(cat "$pf" 2>/dev/null || echo "") && break
+        done
+    fi
+    if [[ -n "$ffmpeg_pid_to_kill" ]] && kill -0 "$ffmpeg_pid_to_kill" 2>/dev/null; then
+        info "  Killing ffmpeg (PID $ffmpeg_pid_to_kill)"
+        kill -9 "$ffmpeg_pid_to_kill" 2>/dev/null || true
     fi
 
     # Clean up this process's temp files (PID-namespaced)

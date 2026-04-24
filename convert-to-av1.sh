@@ -30,7 +30,7 @@ overwrite=""
 max_res=""
 
 # -- SVT-AV1 encoding parameters (decomposed for content-type presets) ---------
-svt_preset=6
+svt_preset=8
 svt_crf=30
 svt_film_grain=0
 svt_film_grain_denoise=0
@@ -91,6 +91,8 @@ apply_content_type() {
         tv)
             svt_film_grain=0
             svt_crf=$(( svt_crf + 1 ))
+            # Boost speed: TV content doesn't need slow presets
+            [[ "$svt_preset" -lt 10 ]] && svt_preset=10
             ;;
         movie)
             svt_film_grain_denoise=1
@@ -564,7 +566,7 @@ OUTPUT:
   --in-place                    Convert and replace in-place (default if no -o)
 
 FILE MANAGEMENT:
-  --smart, --keep-best-version  rm-src + rm-if-bigger + keep the best version
+  --smart, --keep-best-version  rm-src + rm-if-bigger + quality-check + best version
   --rm-source, --rm-src         Remove source if output is smaller
   --rm-if-bigger                Remove output if larger than source
   -y, --overwrite               Overwrite existing output file
@@ -630,6 +632,7 @@ parse_args() {
                 keep_best_version=true
                 remove_source=true
                 remove_if_bigger=true
+                quality_check=true
                 [[ "$audio_mode" == "copy" ]] && audio_mode="auto"
                 shift
                 ;;

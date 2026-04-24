@@ -120,7 +120,7 @@ convert-to-av1 [options] FILES[...]
 
 | Flag | Description |
 |------|-------------|
-| `--smart, --keep-best-version` | Combines `--rm-src` + `--rm-if-bigger`; keeps the best version |
+| `--smart, --keep-best-version` | Combines `--rm-src` + `--rm-if-bigger` + `--quality-check`; keeps the best version |
 | `--rm-source, --rm-src` | Remove source if output is smaller |
 | `--rm-if-bigger` | Remove output if it's larger than source |
 | `-y, --overwrite` | Overwrite existing output file |
@@ -135,21 +135,21 @@ convert-to-av1 [options] FILES[...]
 | `--sd, --fast` | Fast encoding (preset 10, CRF 32) |
 | `--hq` | High quality (preset 4, CRF 28, film-grain 8) |
 | `--cartoon` | Optimised for animation (no grain, higher CRF) |
-| `--tv` | Optimised for TV/broadcasts (no grain, higher CRF) |
+| `--tv` | Optimised for TV/broadcasts (no grain, faster preset) |
 | `--movie` | Optimised for cinema (film-grain + denoise, lower CRF) |
 
 Speed presets (`--fast`, default, `--hq`) and content presets (`--cartoon`, `--tv`, `--movie`) are combinable in any order: `--fast --cartoon`, `--hq --movie`, etc.
 
-Default: preset 6, CRF 30, 10-bit, no film-grain.
+Default: preset 8, CRF 30, 10-bit, no film-grain.
 
 #### Preset matrix
 
 | | `--fast` | default | `--hq` |
 |---|---|---|---|
-| *(none)* | p10 crf32 | p6 crf30 | p4 crf28 grain=8 |
-| `--cartoon` | p10 crf34 | p6 crf32 | p4 crf30 |
-| `--tv` | p10 crf33 | p6 crf31 | p4 crf29 |
-| `--movie` | p10 crf30 grain=8 denoise | p6 crf28 grain=10 denoise | p4 crf26 grain=10 denoise |
+| *(none)* | p10 crf32 | p8 crf30 | p4 crf28 grain=8 |
+| `--cartoon` | p10 crf34 | p8 crf32 | p4 crf30 |
+| `--tv` | p10 crf33 | p10 crf31 | p10 crf29 |
+| `--movie` | p10 crf30 grain=8 denoise | p8 crf28 grain=10 denoise | p4 crf26 grain=10 denoise |
 
 All presets use 10-bit encoding, enable-overlays, and scene-change detection. Film-grain synthesis is only enabled for `--hq` (alone) and `--movie` — it improves perceived quality for film content but has a significant performance cost (~3.5x slower). `--movie` also enables `film-grain-denoise` to preserve and re-synthesize grain from the source.
 

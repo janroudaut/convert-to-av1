@@ -51,7 +51,7 @@ early_abort=true
 early_abort_threshold=8
 merge_subs=true
 recursive=false
-audio_mode="copy"  # copy, opus, auto
+audio_mode="auto"  # copy, opus, auto
 audio_bitrate_threshold=200  # kb/s — auto mode re-encodes above this
 min_size=0  # bytes — skip files smaller than this
 exclude_patterns=()
@@ -594,8 +594,9 @@ BATCH:
   --after CMD                   Run CMD after the batch completes
 
 AUDIO:
+  --copy-audio                  Keep original audio (no re-encoding)
   --opus                        Re-encode audio to Opus (conservative bitrates)
-  --auto-audio                  Re-encode to Opus only if source bitrate > threshold
+  --auto-audio                  Re-encode to Opus only if source bitrate > threshold (default)
   --audio-threshold KB/S        Bitrate threshold for auto mode (default: 200)
 
 SUBTITLES:
@@ -633,7 +634,6 @@ parse_args() {
                 remove_source=true
                 remove_if_bigger=true
                 quality_check=true
-                [[ "$audio_mode" == "copy" ]] && audio_mode="auto"
                 shift
                 ;;
             --remove-source|--rm-source|--rm-src)
@@ -664,6 +664,7 @@ parse_args() {
             --hq)
                 svt_preset=4; svt_crf=28; svt_film_grain=8
                 speed_preset="hq"
+                [[ "$audio_mode" == "auto" ]] && audio_mode="copy"
                 shift
                 ;;
             --cartoon)
@@ -727,6 +728,10 @@ parse_args() {
             --early-abort-threshold)
                 early_abort_threshold="$2"
                 shift 2
+                ;;
+            --copy-audio)
+                audio_mode="copy"
+                shift
                 ;;
             --opus)
                 audio_mode="opus"

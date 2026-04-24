@@ -170,8 +170,9 @@ All presets use 10-bit encoding, enable-overlays, and scene-change detection. Fi
 
 | Flag | Description |
 |------|-------------|
+| `--copy-audio` | Keep original audio (no re-encoding) |
 | `--opus` | Re-encode audio to Opus (conservative bitrates) |
-| `--auto-audio` | Re-encode to Opus only if source bitrate exceeds threshold |
+| `--auto-audio` | Re-encode to Opus only if source bitrate exceeds threshold (default) |
 | `--audio-threshold KB/S` | Bitrate threshold for `--auto-audio` (default: 200) |
 
 ### Subtitles

@@ -32,7 +32,7 @@ max_res=""
 # -- SVT-AV1 encoding parameters (decomposed for content-type presets) ---------
 svt_preset=6
 svt_crf=30
-svt_film_grain=6
+svt_film_grain=0
 svt_film_grain_denoise=0
 svt_tune=0
 svt_pix_fmt="yuv420p10le"
@@ -86,16 +86,11 @@ apply_content_type() {
     case "$content_type" in
         cartoon)
             svt_film_grain=0
-            svt_film_grain_denoise=0
             svt_crf=$(( svt_crf + 2 ))
             ;;
         tv)
+            svt_film_grain=0
             svt_crf=$(( svt_crf + 1 ))
-            case "$speed_preset" in
-                fast)    svt_film_grain=4 ;;
-                default) svt_film_grain=5 ;;
-                hq)      svt_film_grain=6 ;;
-            esac
             ;;
         movie)
             svt_film_grain_denoise=1
@@ -565,7 +560,7 @@ QUALITY:
   --max-res, --max-h HEIGHT     Scale down to HEIGHT px if source is taller
   --1080, --1080p               Alias for --max-res 1080
   --720, --720p                 Alias for --max-res 720
-  --sd, --fast                  Fast encoding (preset 10, crf 32, film-grain 4)
+  --sd, --fast                  Fast encoding (preset 10, crf 32)
   --hq                          High quality (preset 4, crf 28, 10-bit, film-grain 8)
   --cartoon                     Optimised for animation (no grain, higher CRF)
   --tv                          Optimised for TV/broadcasts (moderate grain, higher CRF)
@@ -646,7 +641,7 @@ parse_args() {
                 shift
                 ;;
             --sd|--fast)
-                svt_preset=10; svt_crf=32; svt_film_grain=4
+                svt_preset=10; svt_crf=32; svt_film_grain=0
                 speed_preset="fast"
                 shift
                 ;;
@@ -904,9 +899,9 @@ build_ffmpeg_cmd() {
 
     _cmd=(ffmpeg -hide_banner)
 
-    # MPEG-TS: fix timestamps
+    # MPEG-TS: fix timestamps and tolerate corrupt packets
     if is_mpeg_ts "$input"; then
-        _cmd+=(-fflags +genpts+igndts -avoid_negative_ts make_zero)
+        _cmd+=(-fflags +genpts+igndts+discardcorrupt -avoid_negative_ts make_zero -err_detect ignore_err)
         debug "MPEG-TS detected, applying timestamp fix flags"
     fi
 

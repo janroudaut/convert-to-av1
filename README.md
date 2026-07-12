@@ -14,6 +14,7 @@ Batch video converter to AV1 using FFmpeg and SVT-AV1. Designed to reduce storag
 - **Language track filtering** — keep only selected audio/subtitle languages (e.g. `fr,en`) to strip unwanted tracks
 - **Remux / cleanup mode** — `--copy-streams` strips tracks without re-encoding (fast)
 - **Per-directory profiles** — a `.convert-profile` file applies folder-specific flags (e.g. `--movie` for grainy films, `--cartoon` for animation)
+- **Staging on fast disk** — `--staging DIR` does the read/encode/SSIM on local storage to avoid slow-mount latency (WSL `/mnt`, NAS)
 - **Cover art safe** — attached_pic covers/thumbnails are preserved (copied), never fed to the encoder
 - **Resolution scaling** — downscale to 1080p, 720p, or any custom height
 - **Recursive mode** — process entire directory trees
@@ -33,6 +34,9 @@ Batch video converter to AV1 using FFmpeg and SVT-AV1. Designed to reduce storag
 - `ffmpeg` and `ffprobe` (with `libsvtav1` support)
 - `python3` (for file info display)
 - Standard GNU utils: `bc`, `numfmt`, `stat`, `mktemp`
+- RAM: expect roughly **2–3 GB** while encoding 1080p (more for 4K) — SVT-AV1's
+  look-ahead, not the number of audio/subtitle tracks, drives this. Memory is
+  bounded and does not grow with clip length.
 
 Verify your setup:
 
@@ -72,45 +76,6 @@ Verify your setup:
 
 # Preview what would be done
 ./convert-to-av1.sh --dry-run --sort-by-size .
-```
-
-## Docker
-
-### Build
-
-```bash
-docker build -t convert-to-av1 .
-```
-
-### Run
-
-```bash
-# Convert all videos in current directory
-docker run --rm -v "$PWD:/media" --user "$(id -u):$(id -g)" convert-to-av1 .
-
-# Smart mode on a specific folder
-docker run --rm -v "/path/to/videos:/media" --user "$(id -u):$(id -g)" convert-to-av1 --smart .
-
-# Interactive mode (progress bar, skip with ">", colors)
-docker run --rm -it -v "$PWD:/media" --user "$(id -u):$(id -g)" convert-to-av1 --smart .
-
-# Check dependencies inside the container
-docker run --rm convert-to-av1 --check
-```
-
-- **`--user "$(id -u):$(id -g)"`** ensures output files are owned by your host user, not root
-- **`-it`** enables the progress bar and colors (the script auto-detects TTY)
-- **`-v`** bind-mounts the directory containing your videos to `/media`
-
-### Wrapper
-
-A convenience wrapper (`convert-to-av1-docker`) handles volume mounting, UID/GID mapping, and TTY detection automatically:
-
-```bash
-# Same usage as the native script
-./convert-to-av1-docker --smart .
-./convert-to-av1-docker --fast -r /path/to/videos/
-./convert-to-av1-docker --check
 ```
 
 ## Usage
@@ -168,6 +133,7 @@ All presets use 10-bit encoding, enable-overlays, and scene-change detection. Fi
 | Flag | Description |
 |------|-------------|
 | `-r, --recursive` | Recurse into subdirectories |
+| `--staging, --work-dir DIR` | Stage source + encode + SSIM on a fast local disk, then write the output to its destination |
 | `--sort-by-size [asc\|desc]` | Sort files by size before processing (default: desc) |
 | `--min-size SIZE` | Skip files smaller than SIZE (e.g., `100M`, `1G`) |
 | `--exclude PATTERN` | Exclude files matching glob pattern (repeatable) |
@@ -175,6 +141,13 @@ All presets use 10-bit encoding, enable-overlays, and scene-change detection. Fi
 | `--no-early-abort` | Disable early abort when output is estimated larger |
 | `--early-abort-threshold PCT` | Progress % at which to evaluate (default: 8) |
 | `--after CMD` | Run CMD after the batch completes |
+
+**Slow storage (WSL `/mnt`, network shares, NAS):** these mounts have high per-operation latency, which especially punishes the random seeks the SSIM quality check does across multi-GB files — often felt as long, silent stalls. `--staging DIR` copies each source to a fast local disk (e.g. `~/work` on ext4), runs the encode **and** the SSIM check there, then writes the finished file back to its destination atomically. The source read becomes one sequential copy (the least-bad case for these mounts) instead of scattered seeks.
+
+```bash
+# Convert files on a slow Windows mount, but do all the work on native ext4
+./convert-to-av1.sh --smart -r --staging ~/work "/mnt/d/Videos/Series/"
+```
 
 ### Audio
 
@@ -269,6 +242,28 @@ Adjacent `.txt` files are embedded as MKV `description` metadata but are **never
 
 ## How it works
 
+```mermaid
+flowchart TD
+    A[Collect and sort files] --> B{Already AV1?}
+    B -- yes, not remux --> SKIP[Skip]
+    B -- no --> PROF[Apply .convert-profile]
+    PROF --> PROBE[Probe streams, duration, codec<br/>MPEG-TS timestamp fix if needed]
+    PROBE --> MAP[Select tracks: main video to AV1,<br/>copy cover art, keep/filter audio and subs,<br/>merge adjacent .srt/.vtt]
+    MAP --> ENC[Encode with SVT-AV1<br/>per-stream Opus audio]
+    ENC --> EA{Early abort?<br/>estimated output larger}
+    EA -- smart or rm-if-bigger --> KEEPSRC[Keep source, discard output]
+    EA -- no --> QC{Quality OK?<br/>SSIM above minimum}
+    QC -- no --> DROP[Discard output]
+    QC -- yes --> SIZE{Output smaller?}
+    SIZE -- yes --> DONE[Swap in .mkv<br/>remove source if requested]
+    SIZE -- no --> BEST[Keep best version]
+    SKIP --> SUM[Summary table]
+    KEEPSRC --> SUM
+    DROP --> SUM
+    DONE --> SUM
+    BEST --> SUM
+```
+
 1. **Probe** — reads container format, streams, duration, and codec info
 2. **Skip** — if the video is already AV1, skip it (unless `--copy-streams`, which can still clean it)
 3. **MPEG-TS fix** — if the container is MPEG-TS, applies `-fflags +genpts+igndts -avoid_negative_ts make_zero`
@@ -317,6 +312,47 @@ Input: `mp4`, `mkv`, `avi`, `mov`, `wmv`, `flv`, `ts`, `m2ts`, `mts`, `m4v`, `we
 
 Output: MKV (Matroska) — chosen for its broad codec and subtitle support.
 
+## Docker (optional)
+
+Running natively is the standard path. Docker is just a convenience if you'd rather not install ffmpeg/SVT-AV1 on the host.
+
+### Build
+
+```bash
+docker build -t convert-to-av1 .
+```
+
+### Run
+
+```bash
+# Convert all videos in current directory
+docker run --rm -v "$PWD:/media" --user "$(id -u):$(id -g)" convert-to-av1 .
+
+# Smart mode on a specific folder
+docker run --rm -v "/path/to/videos:/media" --user "$(id -u):$(id -g)" convert-to-av1 --smart .
+
+# Interactive mode (progress bar, skip with ">", colors)
+docker run --rm -it -v "$PWD:/media" --user "$(id -u):$(id -g)" convert-to-av1 --smart .
+
+# Check dependencies inside the container
+docker run --rm convert-to-av1 --check
+```
+
+- **`--user "$(id -u):$(id -g)"`** ensures output files are owned by your host user, not root
+- **`-it`** enables the progress bar and colors (the script auto-detects TTY)
+- **`-v`** bind-mounts the directory containing your videos to `/media`
+
+### Wrapper
+
+A convenience wrapper (`convert-to-av1-docker`) handles volume mounting, UID/GID mapping, and TTY detection automatically:
+
+```bash
+# Same usage as the native script
+./convert-to-av1-docker --smart .
+./convert-to-av1-docker --fast -r /path/to/videos/
+./convert-to-av1-docker --check
+```
+
 ## Acknowledgements
 
 First and foremost, to the **FFmpeg** developers, and to the **assembly masters**
@@ -332,4 +368,4 @@ with respect to those who did it properly.
 
 ## License
 
-MIT
+[WTFPL](http://www.wtfpl.net/) — Do What The Fuck You Want To Public License. See `LICENSE`.

@@ -55,6 +55,7 @@ audio_langs=""  # comma-separated language codes to keep (empty = keep all)
 sub_langs=""    # comma-separated language codes to keep (empty = keep all)
 copy_streams=false  # remux only (no re-encode), just strip/keep selected tracks
 use_profiles=true   # honor per-directory .convert-profile files
+staging_dir=""      # if set, stage source + encode + SSIM here (fast local disk)
 audio_mode="auto"  # copy, opus, auto
 audio_bitrate_threshold=200  # kb/s — auto mode re-encodes above this
 min_size=0  # bytes — skip files smaller than this
@@ -69,6 +70,7 @@ CURRENT_TEMP_FILE=""
 CURRENT_LOCK_FILE=""
 CURRENT_STDERR_LOG=""
 CURRENT_FFMPEG_PID=""
+CURRENT_STAGE_DIR=""
 EARLY_ABORTED=false
 SKIP_REQUESTED=false
 SUMMARY_FILES=()
@@ -634,6 +636,20 @@ release_lock() {
 # Cleanup (trap)
 # ==============================================================================
 
+# Recursively kill a process and all its descendants. Needed because the SSIM
+# quality-check ffmpeg runs inside a command substitution, so it is a deep
+# grandchild of $$ — pkill -P $$ (direct children only) would miss it, which is
+# why Ctrl-C during the quality-check phase used to leave ffmpeg running.
+kill_descendants() {
+    local parent="$1" child
+    for child in $(pgrep -P "$parent" 2>/dev/null); do
+        kill_descendants "$child"
+    done
+    if [[ "$parent" != "$$" ]]; then
+        kill -9 "$parent" 2>/dev/null || true
+    fi
+}
+
 cleanup() {
     local exit_code=$?
 
@@ -646,10 +662,10 @@ cleanup() {
         info "Interrupted — cleaning up..."
     fi
 
-    # Kill all child processes (ffmpeg, key reader, subshells)
-    # Use pkill to find children by parent PID — this catches ffmpeg even if
-    # CURRENT_FFMPEG_PID isn't set yet (interrupted before the pipe finished)
-    if pkill -P $$ 2>/dev/null; then
+    # Kill the whole descendant tree (main ffmpeg, key reader, AND the SSIM
+    # ffmpeg which runs inside a command substitution — not a direct child).
+    if [[ -n "$(pgrep -P $$ 2>/dev/null)" ]]; then
+        kill_descendants $$
         info "  Killed child processes"
         wait 2>/dev/null || true
     fi
@@ -673,6 +689,12 @@ cleanup() {
     if [[ -n "$CURRENT_TEMP_FILE" && -f "$CURRENT_TEMP_FILE" ]]; then
         info "  Removing temp file: $CURRENT_TEMP_FILE"
         rm -f "$CURRENT_TEMP_FILE"
+    fi
+
+    # Remove staging directory (staged source copy + local temp)
+    if [[ -n "$CURRENT_STAGE_DIR" && -d "$CURRENT_STAGE_DIR" ]]; then
+        info "  Removing staging dir: $CURRENT_STAGE_DIR"
+        rm -rf "$CURRENT_STAGE_DIR"
     fi
 
     # Remove stderr log
@@ -798,6 +820,9 @@ QUALITY:
   --min-ssim VALUE              Minimum SSIM score 0-1 (default: 0.92)
 
 BATCH:
+  --staging, --work-dir DIR     Stage source + encode + SSIM on fast local disk,
+                                then write output to its destination (great for
+                                slow mounts / WSL /mnt / NAS)
   --sort-by-size [asc|desc]     Sort files by size before processing (default: desc)
   --dry-run                     Show what would be done without converting
   -r, --recursive               Recurse into subdirectories
@@ -1001,6 +1026,10 @@ parse_args() {
                 use_profiles=false
                 shift
                 ;;
+            --staging|--work-dir)
+                staging_dir="$2"
+                shift 2
+                ;;
             -l|--log)
                 log_file="$2"
                 shift 2
@@ -1053,6 +1082,12 @@ parse_args() {
     # Create output directory if needed
     if [[ -n "$output_dir" ]]; then
         mkdir -p "$output_dir"
+    fi
+
+    # Validate staging directory (fast local disk for source + encode + SSIM)
+    if [[ -n "$staging_dir" ]]; then
+        mkdir -p "$staging_dir" 2>/dev/null || die "Cannot create staging dir: $staging_dir"
+        [[ -w "$staging_dir" ]] || die "Staging dir not writable: $staging_dir"
     fi
 }
 
@@ -1149,15 +1184,81 @@ resolve_output_path() {
     fi
 
     # Always use a temp file for atomicity — write to temp, then mv on success.
-    # Temp is created in the same dir as final output (same filesystem for atomic mv).
+    # Temp lives in the staging dir when active (fast local disk for the encode
+    # and SSIM), otherwise in the same dir as the final output (atomic mv).
     local temp_dir
-    if $in_place; then
+    if [[ -n "$CURRENT_STAGE_DIR" ]]; then
+        temp_dir="$CURRENT_STAGE_DIR"
+    elif $in_place; then
         temp_dir="$input_dir"
     else
         temp_dir="$output_dir"
     fi
     RESOLVED_TEMP=$(mktemp "${temp_dir}/.convert-XXXXXX.mkv")
     RESOLVED_IS_TEMP=true
+}
+
+# Copy the source (and adjacent subtitle/description files) into a fresh staging
+# directory on fast local storage. Sets CURRENT_STAGE_DIR and echoes the staged
+# source path. Used to avoid slow random I/O on network/drvfs mounts (WSL /mnt).
+STAGED_INPUT=""
+stage_source() {
+    local input_file="$1"
+    CURRENT_STAGE_DIR=$(mktemp -d "${staging_dir}/.c2av1-XXXXXX") || {
+        warn "Could not create staging dir; converting in place"
+        STAGED_INPUT="$input_file"
+        return 0
+    }
+    local base
+    base=$(basename "$input_file")
+    STAGED_INPUT="${CURRENT_STAGE_DIR}/${base}"
+
+    info "  Staging source to fast disk..."
+    if ! cp -f "$input_file" "$STAGED_INPUT"; then
+        warn "Staging copy failed; converting from original location"
+        rm -rf "$CURRENT_STAGE_DIR"
+        CURRENT_STAGE_DIR=""
+        STAGED_INPUT="$input_file"
+        return 0
+    fi
+
+    # Bring along adjacent subtitles and the description file so the staged
+    # input keeps the same merge/embed behavior.
+    if $merge_subs; then
+        local sf
+        while IFS= read -r sf; do
+            [[ -z "$sf" ]] && continue
+            cp -f "$sf" "${CURRENT_STAGE_DIR}/$(basename "$sf")" 2>/dev/null || true
+        done < <(find_subtitle_files "$input_file")
+    fi
+    local df
+    df=$(find_description_file "$input_file")
+    if [[ -n "$df" ]]; then
+        cp -f "$df" "${CURRENT_STAGE_DIR}/$(basename "$df")" 2>/dev/null || true
+    fi
+}
+
+# Place a finished temp file at its final destination. Uses an atomic rename
+# when on the same filesystem; otherwise copies via a dest-side temp then
+# renames (keeps the destination atomic even across filesystems, e.g. staging
+# on ext4 -> output on a slow mount).
+finalize_output() {
+    local temp="$1" final="$2"
+    local final_dir temp_dev dir_dev
+    final_dir=$(dirname "$final")
+    temp_dev=$(stat -c %d "$temp" 2>/dev/null || echo "0")
+    dir_dev=$(stat -c %d "$final_dir" 2>/dev/null || echo "1")
+
+    if [[ "$temp_dev" == "$dir_dev" ]]; then
+        mv -f "$temp" "$final"
+    else
+        local dest_tmp
+        dest_tmp=$(mktemp "${final_dir}/.convert-XXXXXX.mkv")
+        CURRENT_TEMP_FILE="$dest_tmp"
+        cp -f "$temp" "$dest_tmp"
+        mv -f "$dest_tmp" "$final"
+        rm -f "$temp"
+    fi
 }
 
 # ==============================================================================
@@ -1674,11 +1775,11 @@ convert_file() {
     # Note: no overwrite check here — is_av1() already skips AV1 files,
     # and in-place mode uses temp files for safe atomic replacement.
 
-    # -- Resolve output path (creates temp files for atomicity) ----------------
-    resolve_output_path "$input_file"
-    final_output="$RESOLVED_FINAL"
-    local temp_output="$RESOLVED_TEMP"
-    local is_temp="$RESOLVED_IS_TEMP"
+    # -- Lock ------------------------------------------------------------------
+    if ! acquire_lock "$input_file"; then
+        add_result "$input_file" "LOCKED" "$input_size" 0 "locked"
+        return 0
+    fi
 
     # -- Header ----------------------------------------------------------------
     local batch_info=""
@@ -1709,15 +1810,29 @@ convert_file() {
     ext_desc=$(find_description_file "$input_file")
     [[ -n "$ext_desc" ]] && echo -e "  ${GRAY}+desc: $(basename "$ext_desc")${NC}"
 
-    # -- Lock ------------------------------------------------------------------
-    if ! acquire_lock "$input_file"; then
-        add_result "$input_file" "LOCKED" "$input_size" 0 "locked"
-        return 0
+    # -- Stage source to fast local disk (optional) ----------------------------
+    # Staging only pays off for the SSIM quality check (random seeks across the
+    # whole file). The encode itself reads sequentially and is fine on a slow
+    # mount, so we skip the (large) source copy when there is no SSIM to speed up.
+    local ffmpeg_input="$input_file"
+    if [[ -n "$staging_dir" ]]; then
+        if $quality_check; then
+            stage_source "$input_file"
+            ffmpeg_input="$STAGED_INPUT"
+        else
+            debug "Staging skipped (no --quality-check): encode reads source in place"
+        fi
     fi
+
+    # -- Resolve output path (temp on staging disk when active) ----------------
+    resolve_output_path "$input_file"
+    final_output="$RESOLVED_FINAL"
+    local temp_output="$RESOLVED_TEMP"
+    local is_temp="$RESOLVED_IS_TEMP"
 
     # -- Build ffmpeg command --------------------------------------------------
     local -a cmd
-    build_ffmpeg_cmd "$input_file" "$temp_output" cmd
+    build_ffmpeg_cmd "$ffmpeg_input" "$temp_output" cmd
 
     debug "CMD: ${cmd[*]}"
 
@@ -1728,11 +1843,11 @@ convert_file() {
 
     # -- Run conversion --------------------------------------------------------
     local duration
-    duration=$(get_duration_secs "$input_file")
+    duration=$(get_duration_secs "$ffmpeg_input")
     # Estimate total video frames (duration * fps) — used for the progress bar
     # in stream-copy mode, where ffmpeg reports out_time as N/A.
     local total_frames
-    total_frames=$(get_total_frames "$input_file" "$duration")
+    total_frames=$(get_total_frames "$ffmpeg_input" "$duration")
     local start_time
     start_time=$(date +%s)
 
@@ -1818,9 +1933,17 @@ convert_file() {
     CURRENT_STDERR_LOG=""
 
     # -- Post-process ----------------------------------------------------------
-    post_process "$input_file" "$final_output" "$temp_output" "$ffmpeg_exit" "$is_temp" "$input_size" "$ts_ref"
+    # ssim_source is the staged copy when staging (keeps SSIM I/O on fast disk).
+    post_process "$input_file" "$final_output" "$temp_output" "$ffmpeg_exit" \
+        "$is_temp" "$input_size" "$ts_ref" "$ffmpeg_input"
 
     rm -f "$ts_ref"
+
+    # -- Clean up staging dir --------------------------------------------------
+    if [[ -n "$CURRENT_STAGE_DIR" && -d "$CURRENT_STAGE_DIR" ]]; then
+        rm -rf "$CURRENT_STAGE_DIR"
+        CURRENT_STAGE_DIR=""
+    fi
 
     # -- Release lock ----------------------------------------------------------
     release_lock "$input_file"
@@ -1842,10 +1965,12 @@ compute_ssim_sampled() {
     local dur
     dur=$(get_duration_secs "$source")
     if [[ "$dur" -lt 10 ]]; then
-        # Short file: compare the whole thing
+        # Short file: compare the whole thing. Explicit [0:v:0][1:v:0] pads are
+        # required — a bare "ssim" picks streams wrongly when a cover/attached_pic
+        # second video stream is present (returns N/A otherwise).
         local result
         result=$(ffmpeg -hide_banner -i "$source" -i "$output" \
-            -filter_complex "ssim" -f null /dev/null 2>&1 \
+            -filter_complex "[0:v:0][1:v:0]ssim" -f null /dev/null 2>&1 \
             | grep -oP 'All:\K[0-9.]+' | tail -1) || true
         echo "${result:-N/A}"
         return
@@ -1857,19 +1982,29 @@ compute_ssim_sampled() {
     positions+=( $(( dur * 50 / 100 )) )
     positions+=( $(( dur * 90 / 100 )) )
 
-    local total=0 count=0
+    local total=0 count=0 i=0 n=${#positions[@]}
     for pos in "${positions[@]}"; do
+        i=$((i + 1))
+        # Feedback on stderr (stdout carries the score) — this phase decodes
+        # both 1080p/4K streams and can run for a while with no other output.
+        if ! $no_progress; then
+            printf "\r  SSIM sampling %d/%d (@%s)...        " \
+                "$i" "$n" "$(format_duration "$pos")" >&2
+        fi
         local ssim_val
         ssim_val=$(ffmpeg -hide_banner \
             -ss "$pos" -t "$quality_sample_secs" -i "$source" \
             -ss "$pos" -t "$quality_sample_secs" -i "$output" \
-            -filter_complex "ssim" -f null /dev/null 2>&1 \
+            -filter_complex "[0:v:0][1:v:0]ssim" -f null /dev/null 2>&1 \
             | grep -oP 'All:\K[0-9.]+' | tail -1) || true
         if [[ -n "$ssim_val" && "$ssim_val" != "0" ]]; then
             total=$(echo "$total + $ssim_val" | bc -l)
             count=$((count + 1))
         fi
     done
+    if ! $no_progress; then
+        printf "\r%-60s\r" " " >&2
+    fi
 
     if [[ "$count" -eq 0 ]]; then
         echo "N/A"
@@ -1895,6 +2030,7 @@ post_process() {
     local is_temp="$5"
     local input_size="$6"
     local ts_ref="${7:-}"
+    local ssim_source="${8:-$input_file}"  # staged copy when staging is active
 
     # Early abort case
     if $EARLY_ABORTED; then
@@ -1935,26 +2071,15 @@ post_process() {
         return 0
     fi
 
-    # Move temp file to final destination
-    if [[ "$is_temp" == true ]]; then
-        mv -f "$temp_output" "$final_output"
-    fi
-    CURRENT_TEMP_FILE=""
-
-    # Preserve source filesystem timestamps (mtime/atime)
-    if [[ -n "$ts_ref" && -f "$ts_ref" ]]; then
-        touch -r "$ts_ref" "$final_output" 2>/dev/null || true
-    fi
-
-    # Compute sizes
+    # Validate the freshly written temp output (still on fast disk when staging)
+    # before placing it at the destination.
     local output_size=0
-    if [[ -f "$final_output" ]]; then
-        output_size=$(get_file_size "$final_output")
-    fi
+    [[ -f "$temp_output" ]] && output_size=$(get_file_size "$temp_output")
 
     if [[ "$output_size" -eq 0 ]]; then
         warn "Output file empty or missing: $final_output"
-        rm -f "$final_output"
+        rm -f "$temp_output"
+        CURRENT_TEMP_FILE=""
         add_result "$input_file" "FAILED" "$input_size" 0 "empty output"
         return 0
     fi
@@ -1964,16 +2089,18 @@ post_process() {
     local min_output_size=1024
     if [[ "$output_size" -lt "$min_output_size" ]]; then
         warn "Output too small (${output_size} bytes), likely corrupt: $final_output"
-        rm -f "$final_output"
+        rm -f "$temp_output"
+        CURRENT_TEMP_FILE=""
         add_result "$input_file" "FAILED" "$input_size" 0 "corrupt output (${output_size} bytes)"
         return 0
     fi
 
-    # Quality check (SSIM sampling)
-    if $quality_check && [[ -f "$input_file" ]]; then
+    # Quality check (SSIM sampling) — done on the temp before writing to the
+    # destination, so a rejected encode never touches the (possibly slow) target.
+    if $quality_check && [[ -f "$ssim_source" ]]; then
         info "  Quality check (SSIM sampling)..."
         local ssim_score
-        ssim_score=$(compute_ssim_sampled "$input_file" "$final_output")
+        ssim_score=$(compute_ssim_sampled "$ssim_source" "$temp_output")
         if [[ "$ssim_score" == "N/A" ]]; then
             warn "Quality check failed (could not compute SSIM): $final_output"
         else
@@ -1981,12 +2108,27 @@ post_process() {
             ssim_ok=$(echo "$ssim_score >= $quality_min_ssim" | bc -l 2>/dev/null || echo "1")
             if [[ "$ssim_ok" -eq 0 ]]; then
                 warn "Quality too low (SSIM=${ssim_score}, min=${quality_min_ssim}): $final_output"
-                rm -f "$final_output"
+                rm -f "$temp_output"
+                CURRENT_TEMP_FILE=""
                 add_result "$input_file" "FAILED" "$input_size" "$output_size" "SSIM ${ssim_score} < ${quality_min_ssim}"
                 return 0
             fi
             info "  SSIM: ${ssim_score} (min: ${quality_min_ssim})"
         fi
+    fi
+
+    # Place the validated output at its final destination (atomic; cross-fs
+    # aware, e.g. staging on ext4 -> output on a slow mount).
+    if [[ "$is_temp" == true ]]; then
+        finalize_output "$temp_output" "$final_output"
+    else
+        mv -f "$temp_output" "$final_output"
+    fi
+    CURRENT_TEMP_FILE=""
+
+    # Preserve source filesystem timestamps (mtime/atime)
+    if [[ -n "$ts_ref" && -f "$ts_ref" ]]; then
+        touch -r "$ts_ref" "$final_output" 2>/dev/null || true
     fi
 
     # Size saved
@@ -2244,6 +2386,9 @@ print_banner() {
 
     # Per-directory profiles (shown unless disabled)
     $use_profiles && banner_line "profiles" ".convert-profile (per dir)"
+
+    # Staging directory (conditional)
+    [[ -n "$staging_dir" ]] && banner_line "staging" "$staging_dir" "$ORANGE"
 
     # Batch options (conditional)
     [[ -n "$sort_by_size" ]] && banner_line "sort" "$sort_by_size"

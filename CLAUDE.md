@@ -40,6 +40,20 @@ ffmpeg (with libsvtav1), ffprobe, python3, bc, numfmt, stat, mktemp
   already-AV1 skip so AV1 files can still be cleaned. In `-c copy` mode ffmpeg
   reports `out_time=N/A`, so the progress bar falls back to muxed-frame count
   (`get_total_frames`); early-abort stays gated on real timestamps only (encode)
+- SSIM quality check MUST use explicit `[0:v:0][1:v:0]ssim` pads — a bare `ssim`
+  filter mis-selects streams and returns N/A when a cover/attached_pic second
+  video stream is present (silently disabling the check). SSIM is I/O-bound: ~1s
+  per 10s sample on ext4 vs 24–105s on WSL `/mnt` (drvfs seeks) — the phase is
+  fast unless the files live on a slow mount
+- SSIM ffmpeg runs inside a command substitution (deep grandchild), so cleanup
+  uses `kill_descendants` (recursive) — `pkill -P $$` alone left it running on Ctrl-C
+- `--staging`/`--work-dir DIR`: per file, copies source (+ adjacent subs/desc)
+  to a fresh `mktemp -d` under DIR, encodes + runs SSIM there (fast local disk
+  vs slow WSL `/mnt`/NAS seeks), then `finalize_output` places the result at the
+  destination — atomic `mv` on same fs, else copy-to-dest-temp + atomic `mv`.
+  `post_process` validates size + SSIM on the temp *before* placing it, so a
+  rejected encode never reaches the (slow) destination. Staging dir is cleaned
+  per file and in the EXIT trap (`CURRENT_STAGE_DIR`)
 - Per-directory `.convert-profile`: encoding/quality/audio/track flags applied
   per file by walking up from its dir (`resolve_file_profile`). CLI config is
   snapshotted (`snapshot_base_config`/`BASE_CFG`) and restored per file so

@@ -9,7 +9,7 @@ bash -n convert-to-av1.sh              # Syntax check
 shellcheck convert-to-av1.sh           # Lint (static analysis)
 bash convert-to-av1.sh --help           # Show usage
 bash convert-to-av1.sh --dry-run .      # Test run (no conversion)
-bash test.sh                            # Integration suite (39 tests, synthetic files)
+bash test.sh                            # Integration suite (38 tests, synthetic files)
 bash test.sh --docker                   # Same, through the Docker wrapper
 ```
 
@@ -53,6 +53,12 @@ ffmpeg (with libsvtav1), ffprobe, python3, bc, numfmt, stat, mktemp
   *before* the atomic `mv` to the destination — so a rejected encode never
   overwrites the source (in-place `.mkv`) and the check compares against the
   still-intact source, not the output-vs-itself
+- `--skip-log[=FILE]`: records files not worth converting (SSIM < min, or output
+  larger than source when rejected via `--smart`/`--rm-if-bigger`/early-abort) and
+  skips them on later runs (filtered in `collect_and_sort_files`). Default file
+  `.convert-skip.list` at the input root; paths stored **relative to the log dir**
+  (`skip_key`, portable) with the source size as a safety net (changed file =
+  retried). Line format: `size\trelpath\tdate\treason`
 - Per-directory `.convert-profile`: encoding/quality/audio/track flags applied
   per file by walking up from its dir (`resolve_file_profile`). CLI config is
   snapshotted (`snapshot_base_config`/`BASE_CFG`) and restored per file so

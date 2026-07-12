@@ -716,6 +716,37 @@ test_no_profile_flag() {
 }
 test_no_profile_flag
 
+# --- Skip log ---
+
+section "Skip log"
+
+test_skip_log() {
+    local dir="$TEST_DIR/skiplog"
+    mkdir -p "$dir" "$TEST_DIR/sl-out"
+    generate_video "$dir/v.mp4" 12 320x240
+
+    # Force a quality failure so the file gets recorded in the skip log.
+    "$CONVERT" --no-progress -o "$TEST_DIR/sl-out" --quality-check --min-ssim 0.9999 \
+        --fast --skip-log "$dir/v.mp4" >/dev/null 2>&1
+
+    local logged=false skipped=false
+    if [[ -f "$dir/.convert-skip.list" ]] && grep -q "v.mp4" "$dir/.convert-skip.list"; then
+        logged=true
+    fi
+    # Re-run (dry-run): a skip-logged file is filtered out -> no DRYRUN entry.
+    local out
+    out=$("$CONVERT" --no-progress -o "$TEST_DIR/sl-out" --quality-check --min-ssim 0.9999 \
+        --fast --skip-log --dry-run "$dir/v.mp4" 2>&1)
+    echo "$out" | grep -q "DRYRUN" || skipped=true
+
+    if $logged && $skipped; then
+        pass "--skip-log records failures and skips them on re-run"
+    else
+        fail "skip-log" "logged=$logged skipped=$skipped"
+    fi
+}
+test_skip_log
+
 # --- File filtering ---
 
 section "File filtering"

@@ -135,10 +135,18 @@ All presets use 10-bit encoding, enable-overlays, and scene-change detection. Fi
 | `--sort-by-size [asc\|desc]` | Sort files by size before processing (default: desc) |
 | `--min-size SIZE` | Skip files smaller than SIZE (e.g., `100M`, `1G`) |
 | `--exclude PATTERN` | Exclude files matching glob pattern (repeatable) |
+| `--skip-log[=FILE]` | Record files not worth converting and skip them on re-runs |
 | `--dry-run` | Show what would be done without converting |
 | `--no-early-abort` | Disable early abort when output is estimated larger |
 | `--early-abort-threshold PCT` | Progress % at which to evaluate (default: 8) |
 | `--after CMD` | Run CMD after the batch completes |
+
+**Skip log (`--skip-log`):** when re-converting a directory, files that came out *not worth it* — SSIM below the target, or AV1 larger than the source — are recorded and **skipped on the next run**, so a repeat batch doesn't waste time re-encoding known losers. The log defaults to `.convert-skip.list` at the input root (override with `--skip-log=FILE`); paths are stored relative to it (portable if the tree moves) and a recorded source size means a **changed file is retried**. Each entry keeps the size, date, and reason.
+
+```bash
+# First pass logs the duds; later passes skip them instantly
+./convert-to-av1.sh --smart -r --skip-log /mnt/x/Series/
+```
 
 > **Slow storage (WSL `/mnt`, NAS):** the SSIM quality check does random seeks across multi-GB files, which these mounts handle poorly. For very large files, work from a fast local disk (e.g. rsync to `~/work` on ext4, convert there, copy back).
 

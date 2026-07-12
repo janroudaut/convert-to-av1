@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # ==============================================================================
-# convert-to-av1 v3.1.0 — Batch video conversion to AV1 (SVT-AV1 via ffmpeg)
+# convert-to-av1 v3.2.0 — Batch video conversion to AV1 (SVT-AV1 via ffmpeg)
 # ==============================================================================
 
-VERSION="3.1.0"
+VERSION="3.2.0"
 
 # -- Colors (respects NO_COLOR: https://no-color.org/) -------------------------
 if [[ -n "${NO_COLOR:-}" ]] || [[ ! -t 1 ]]; then
@@ -59,10 +59,13 @@ audio_mode="auto"  # copy, opus, auto
 audio_bitrate_threshold=200  # kb/s — auto mode re-encodes above this
 min_size=0  # bytes — skip files smaller than this
 exclude_patterns=()
+skip_log_enabled=false  # persist quality-check failures and skip them on re-runs
+skip_log_file=""        # path to the failure log (empty = default at -r root)
 after_cmd=""
 quality_check=false
 quality_min_ssim=0.92  # minimum acceptable SSIM (0-1 scale)
 quality_sample_secs=10 # seconds per sample segment for quality check
+quality_samples=5      # number of evenly-spaced sample points for quality check
 
 # -- Global state (for cleanup) ------------------------------------------------
 CURRENT_TEMP_FILE=""
@@ -80,6 +83,9 @@ FILES_PROCESSED=0
 FILES_TOTAL=0
 BATCH_SAVED_BYTES=0
 BATCH_START_TIME=0
+
+# Quality-failure skip log: abspath -> recorded source size (bytes)
+declare -A SKIP_LOG_SIZES=()
 
 # -- Per-directory profile state -----------------------------------------------
 # Base (CLI) encoding config, snapshotted so per-file profiles start clean.
@@ -359,6 +365,76 @@ lang_matches() {
         [[ "$(canon_lang "$token")" == "$stream_canon" ]] && return 0
     done
     return 1
+}
+
+# ==============================================================================
+# Quality-failure skip log
+# ==============================================================================
+#
+# Records files that were converted but not worth keeping (SSIM below target, or
+# output larger than source). On a later batch over the same tree they are
+# skipped instead of re-encoded. Paths are stored relative to the log's own
+# directory so the log stays valid if the tree is moved/mounted elsewhere; a
+# recorded source size acts as a safety net (a changed file is re-tried).
+
+SKIP_LOG_DIR=""  # absolute dir of the skip log (paths are relative to it)
+
+# Absolute path without resolving symlinks (realpath may be absent).
+abspath() {
+    local p="$1"
+    if [[ -d "$p" ]]; then
+        (cd "$p" 2>/dev/null && pwd)
+    else
+        local d
+        d=$(cd "$(dirname "$p")" 2>/dev/null && pwd) || { echo "$p"; return; }
+        echo "${d%/}/$(basename "$p")"
+    fi
+}
+
+# Key under which a file is stored: path relative to the log dir when the file
+# is under it, otherwise its absolute path.
+skip_key() {
+    local af
+    af=$(abspath "$1")
+    if [[ -n "$SKIP_LOG_DIR" && "$af" == "$SKIP_LOG_DIR"/* ]]; then
+        echo "${af#"$SKIP_LOG_DIR"/}"
+    else
+        echo "$af"
+    fi
+}
+
+load_skip_log() {
+    SKIP_LOG_DIR=$(abspath "$(dirname "$skip_log_file")")
+    [[ -f "$skip_log_file" ]] || return 0
+    local size path
+    # Line format: <size>\t<relpath>\t<date>\t<reason>  (reason/date ignored here)
+    while IFS=$'\t' read -r size path _; do
+        [[ -z "$path" || "$size" == \#* ]] && continue
+        [[ "$size" =~ ^[0-9]+$ ]] || continue
+        SKIP_LOG_SIZES["$path"]="$size"
+    done < "$skip_log_file"
+}
+
+# True if the file previously failed and is unchanged (same size = same file).
+is_skip_logged() {
+    $skip_log_enabled || return 1
+    local key rec
+    key=$(skip_key "$1")
+    rec="${SKIP_LOG_SIZES[$key]:-}"
+    [[ -n "$rec" ]] || return 1
+    [[ "$(get_file_size "$1")" == "$rec" ]]
+}
+
+# Record a file as not worth converting (quality/size failure).
+append_skip_log() {
+    $skip_log_enabled || return 0
+    local file="$1" size="$2" reason="$3"
+    local key
+    key=$(skip_key "$file")
+    [[ "${SKIP_LOG_SIZES[$key]:-}" == "$size" ]] && return 0   # already recorded
+    SKIP_LOG_SIZES["$key"]="$size"
+    printf '%s\t%s\t%s\t%s\n' "$size" "$key" "$(date -Iseconds)" "$reason" \
+        >> "$skip_log_file" 2>/dev/null || warn "Could not write skip-log: $skip_log_file"
 }
 
 # ==============================================================================
@@ -812,6 +888,7 @@ QUALITY:
   --movie                       Optimised for cinema (preserve grain, lower CRF)
   --quality-check               SSIM check after conversion; reject if below threshold
   --min-ssim VALUE              Minimum SSIM score 0-1 (default: 0.92)
+  --ssim-samples N              Evenly-spaced sample points for the check (default: 5)
 
 BATCH:
   --sort-by-size [asc|desc]     Sort files by size before processing (default: desc)
@@ -819,6 +896,9 @@ BATCH:
   -r, --recursive               Recurse into subdirectories
   --min-size SIZE               Skip files smaller than SIZE (e.g., 100M, 1G)
   --exclude PATTERN             Exclude files matching glob PATTERN (repeatable)
+  --skip-log[=FILE]             Log files not worth converting (low SSIM / output
+                                larger) and skip them on re-runs. Default FILE:
+                                .convert-skip.list at the input root
   --no-early-abort              Don't abort if output is estimated larger
   --early-abort-threshold PCT   Progress % at which to evaluate (default: 8)
   --after CMD                   Run CMD after the batch completes
@@ -933,6 +1013,11 @@ parse_args() {
                 quality_min_ssim="$2"
                 shift 2
                 ;;
+            --ssim-samples)
+                quality_check=true
+                quality_samples="$2"
+                shift 2
+                ;;
             -y|--overwrite)
                 overwrite="-y"
                 shift
@@ -961,6 +1046,15 @@ parse_args() {
             --exclude)
                 exclude_patterns+=("$2")
                 shift 2
+                ;;
+            --skip-log)
+                skip_log_enabled=true
+                shift
+                ;;
+            --skip-log=*)
+                skip_log_enabled=true
+                skip_log_file="${1#*=}"
+                shift
                 ;;
             --after)
                 after_cmd="$2"
@@ -1071,6 +1165,16 @@ parse_args() {
         mkdir -p "$output_dir"
     fi
 
+    # Resolve the default skip-log location: .convert-skip.list at the root of
+    # the first input (the -r directory), unless an explicit path was given.
+    if $skip_log_enabled && [[ -z "$skip_log_file" ]]; then
+        local root="${input_args[0]}"
+        if [[ -d "$root" ]]; then
+            skip_log_file="${root%/}/.convert-skip.list"
+        else
+            skip_log_file="$(dirname "$root")/.convert-skip.list"
+        fi
+    fi
 }
 
 # ==============================================================================
@@ -1105,6 +1209,11 @@ collect_and_sort_files() {
         if is_excluded "$f"; then
             debug "Excluded by pattern: $f"
             add_result "$f" "SKIPPED" 0 0 "excluded"
+            continue
+        fi
+        if is_skip_logged "$f"; then
+            debug "In skip-log (previously not worth converting): $f"
+            add_result "$f" "SKIPPED" "$(get_file_size "$f")" 0 "in skip-log"
             continue
         fi
         if [[ "$min_size" -gt 0 ]]; then
@@ -1871,11 +1980,20 @@ compute_ssim_sampled() {
         return
     fi
 
-    # Sample at 10%, 50%, 90% of duration
+    # Sample at N evenly-spaced points spanning 10%..90% of the duration
+    # (e.g. 3 -> 10/50/90%, 5 -> 10/30/50/70/90%). More points = more robust.
     local positions=()
-    positions+=( $(( dur * 10 / 100 )) )
-    positions+=( $(( dur * 50 / 100 )) )
-    positions+=( $(( dur * 90 / 100 )) )
+    local n_samp="$quality_samples"
+    [[ "$n_samp" -lt 1 ]] && n_samp=1
+    if [[ "$n_samp" -eq 1 ]]; then
+        positions+=( $(( dur * 50 / 100 )) )
+    else
+        local si pct
+        for (( si = 0; si < n_samp; si++ )); do
+            pct=$(( 10 + si * 80 / (n_samp - 1) ))
+            positions+=( $(( dur * pct / 100 )) )
+        done
+    fi
 
     local total=0 count=0 i=0 n=${#positions[@]}
     for pos in "${positions[@]}"; do
@@ -1944,6 +2062,7 @@ post_process() {
             fi
         fi
 
+        append_skip_log "$input_file" "$input_size" "early-abort: estimated output larger"
         add_result "$input_file" "ABORTED" "$input_size" 0 "estimated output larger"
         return 0
     fi
@@ -2002,6 +2121,7 @@ post_process() {
             ssim_ok=$(echo "$ssim_score >= $quality_min_ssim" | bc -l 2>/dev/null || echo "1")
             if [[ "$ssim_ok" -eq 0 ]]; then
                 warn "Quality too low (SSIM=${ssim_score}, min=${quality_min_ssim}): $final_output"
+                append_skip_log "$input_file" "$input_size" "SSIM ${ssim_score} < ${quality_min_ssim}"
                 rm -f "$temp_output"
                 CURRENT_TEMP_FILE=""
                 add_result "$input_file" "FAILED" "$input_size" "$output_size" "SSIM ${ssim_score} < ${quality_min_ssim}"
@@ -2032,6 +2152,12 @@ post_process() {
 
     if [[ "$output_size" -gt "$input_size" ]]; then
         warn "Output larger: $(human_size "$output_size") vs $(human_size "$input_size") (saved=${saved_pct}%)"
+
+        # Record when the output is rejected for being larger (re-encoding it
+        # again is pointless). Logged before any source move so the path is right.
+        if $keep_best_version || $remove_if_bigger; then
+            append_skip_log "$input_file" "$input_size" "output larger than source"
+        fi
 
         if $keep_best_version; then
             info "  Smart: output larger, removing it and keeping source."
@@ -2271,7 +2397,7 @@ print_banner() {
     fi
 
     # Quality check (conditional)
-    $quality_check && banner_line "quality check" "SSIM >= ${quality_min_ssim}"
+    $quality_check && banner_line "quality check" "SSIM >= ${quality_min_ssim} (${quality_samples} samples)"
 
     # Subtitles (conditional — only shown if enabled)
     $merge_subs && banner_line "subtitles" "merge .srt/.vtt"
@@ -2283,6 +2409,7 @@ print_banner() {
     [[ -n "$sort_by_size" ]] && banner_line "sort" "$sort_by_size"
     [[ "$min_size" -gt 0 ]] && banner_line "min size" "$(human_size "$min_size")"
     [[ ${#exclude_patterns[@]} -gt 0 ]] && banner_line "exclude" "${exclude_patterns[*]}"
+    $skip_log_enabled && banner_line "skip-log" "$skip_log_file"
     [[ -n "$after_cmd" ]] && banner_line "after" "$after_cmd"
 
     echo -e "${GRAY}${sep}${NC}"
@@ -2303,6 +2430,7 @@ main() {
     apply_content_type
     build_svtav1_options
     check_dependencies
+    $skip_log_enabled && load_skip_log
 
     local sorted_files=()
     collect_and_sort_files sorted_files

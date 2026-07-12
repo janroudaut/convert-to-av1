@@ -716,30 +716,6 @@ test_no_profile_flag() {
 }
 test_no_profile_flag
 
-# --- Staging directory ---
-
-section "Staging directory"
-
-test_staging() {
-    local dir="$TEST_DIR/stage-src"
-    local stg="$TEST_DIR/stage-work"
-    mkdir -p "$dir" "$stg"
-    generate_video "$dir/v.mp4" 3
-
-    # Staging applies to all work (even without a quality check).
-    "$CONVERT" --no-progress --fast --staging "$stg" "$dir/v.mp4" >/dev/null 2>&1 && rc=0 || rc=$?
-
-    local codec leftover
-    codec=$(get_codec "$dir/v.mkv")
-    leftover=$(find "$stg" -mindepth 1 2>/dev/null | wc -l)
-    if [[ $rc -eq 0 ]] && [[ "$codec" == "av1" ]] && [[ "$leftover" -eq 0 ]]; then
-        pass "--staging converts and cleans up the staging dir"
-    else
-        fail "staging" "codec '$codec', $leftover leftover in staging (exit $rc)"
-    fi
-}
-test_staging
-
 # --- File filtering ---
 
 section "File filtering"

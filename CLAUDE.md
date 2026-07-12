@@ -49,13 +49,10 @@ ffmpeg (with libsvtav1), ffprobe, python3, bc, numfmt, stat, mktemp
   fast unless the files live on a slow mount
 - SSIM ffmpeg runs inside a command substitution (deep grandchild), so cleanup
   uses `kill_descendants` (recursive) — `pkill -P $$` alone left it running on Ctrl-C
-- `--staging`/`--work-dir DIR`: per file, copies source (+ adjacent subs/desc)
-  to a fresh `mktemp -d` under DIR, encodes + runs SSIM there (fast local disk
-  vs slow WSL `/mnt`/NAS seeks), then `finalize_output` places the result at the
-  destination — atomic `mv` on same fs, else copy-to-dest-temp + atomic `mv`.
-  `post_process` validates size + SSIM on the temp *before* placing it, so a
-  rejected encode never reaches the (slow) destination. Staging dir is cleaned
-  per file and in the EXIT trap (`CURRENT_STAGE_DIR`)
+- `post_process` validates size + runs the SSIM check on the temp output
+  *before* the atomic `mv` to the destination — so a rejected encode never
+  overwrites the source (in-place `.mkv`) and the check compares against the
+  still-intact source, not the output-vs-itself
 - Per-directory `.convert-profile`: encoding/quality/audio/track flags applied
   per file by walking up from its dir (`resolve_file_profile`). CLI config is
   snapshotted (`snapshot_base_config`/`BASE_CFG`) and restored per file so

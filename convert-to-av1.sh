@@ -51,6 +51,9 @@ early_abort=true
 early_abort_threshold=8
 merge_subs=true
 recursive=false
+audio_langs=""  # comma-separated language codes to keep (empty = keep all)
+sub_langs=""    # comma-separated language codes to keep (empty = keep all)
+copy_streams=false  # remux only (no re-encode), just strip/keep selected tracks
 audio_mode="auto"  # copy, opus, auto
 audio_bitrate_threshold=200  # kb/s — auto mode re-encodes above this
 min_size=0  # bytes — skip files smaller than this
@@ -189,6 +192,65 @@ add_result() {
 }
 
 # ==============================================================================
+# Language matching (track filtering)
+# ==============================================================================
+
+# Canonicalise a language code to its ISO 639-2/B 3-letter form when known.
+# Unknown codes are returned lowercased and unchanged (allows exact-tag matching).
+canon_lang() {
+    local c="${1,,}"
+    case "$c" in
+        fr|fre|fra)     echo "fre" ;;
+        en|eng)         echo "eng" ;;
+        de|ger|deu)     echo "ger" ;;
+        es|spa)         echo "spa" ;;
+        it|ita)         echo "ita" ;;
+        pt|por)         echo "por" ;;
+        ja|jpn)         echo "jpn" ;;
+        zh|chi|zho)     echo "chi" ;;
+        ru|rus)         echo "rus" ;;
+        nl|dut|nld)     echo "dut" ;;
+        pl|pol)         echo "pol" ;;
+        sv|swe)         echo "swe" ;;
+        no|nor)         echo "nor" ;;
+        da|dan)         echo "dan" ;;
+        fi|fin)         echo "fin" ;;
+        ko|kor)         echo "kor" ;;
+        ar|ara)         echo "ara" ;;
+        tr|tur)         echo "tur" ;;
+        cs|cze|ces)     echo "cze" ;;
+        el|gre|ell)     echo "gre" ;;
+        hu|hun)         echo "hun" ;;
+        he|heb)         echo "heb" ;;
+        hi|hin)         echo "hin" ;;
+        *)              echo "$c" ;;
+    esac
+}
+
+# Return 0 if a stream's language tag matches any code in a comma-separated list.
+# Undefined/missing languages ("", "und") always match (kept as a safety net).
+lang_matches() {
+    local stream_lang="${1,,}"
+    local requested_csv="$2"
+
+    if [[ -z "$stream_lang" || "$stream_lang" == "und" ]]; then
+        return 0
+    fi
+
+    local stream_canon
+    stream_canon=$(canon_lang "$stream_lang")
+
+    local IFS=','
+    local token
+    for token in $requested_csv; do
+        token="${token// /}"
+        [[ -z "$token" ]] && continue
+        [[ "$(canon_lang "$token")" == "$stream_canon" ]] && return 0
+    done
+    return 1
+}
+
+# ==============================================================================
 # Probe functions (ffprobe)
 # ==============================================================================
 
@@ -222,6 +284,35 @@ get_duration_secs() {
     dur="${dur%%,*}"
     dur=$(echo "$dur" | tr -cd '0-9.')
     printf "%.0f" "${dur:-0}" 2>/dev/null || echo "0"
+}
+
+# Estimate the primary video stream's total frame count (duration * fps).
+# Used to drive the progress bar in stream-copy mode (out_time reports N/A).
+get_total_frames() {
+    local file="$1" duration="${2:-0}"
+    # Prefer the container's frame count tag when present (exact, no math)
+    local nb
+    nb=$(ffprobe -v error -select_streams v:0 \
+        -show_entries stream=nb_frames -of csv=p=0 "$file" 2>/dev/null | head -1)
+    nb="${nb//[!0-9]/}"
+    if [[ -n "$nb" && "$nb" -gt 0 ]]; then
+        echo "$nb"
+        return
+    fi
+    # Fall back to duration * average frame rate
+    local rfr
+    rfr=$(ffprobe -v error -select_streams v:0 \
+        -show_entries stream=avg_frame_rate -of csv=p=0 "$file" 2>/dev/null | head -1)
+    rfr="${rfr%%,*}"
+    if [[ "$rfr" == */* && "$duration" -gt 0 ]]; then
+        local num den
+        num="${rfr%/*}"; den="${rfr#*/}"
+        if [[ "$num" =~ ^[0-9]+$ && "$den" =~ ^[0-9]+$ && "$den" -gt 0 ]]; then
+            echo $(( duration * num / den ))
+            return
+        fi
+    fi
+    echo "0"
 }
 
 # Get audio bitrate in kb/s for the first audio stream
@@ -265,6 +356,18 @@ get_opus_bitrate() {
         6) echo "256k" ;;   # 5.1
         8) echo "320k" ;;   # 7.1
         *) echo "192k" ;;   # safe default
+    esac
+}
+
+# Canonical channel layout for a channel count. libopus rejects non-standard
+# layouts like "5.1(side)"; normalising to a standard layout (via aformat)
+# fixes "Could not open encoder" while preserving all surround channels.
+# Empty output = no normalisation needed (mono/stereo or unknown count).
+opus_channel_layout() {
+    case "$1" in
+        6) echo "5.1" ;;
+        8) echo "7.1" ;;
+        *) echo "" ;;
     esac
 }
 
@@ -599,6 +702,14 @@ AUDIO:
   --auto-audio                  Re-encode to Opus only if source bitrate > threshold (default)
   --audio-threshold KB/S        Bitrate threshold for auto mode (default: 200)
 
+TRACKS (keep only selected languages; default keeps all):
+  --langs LIST                  Keep only these languages for audio AND subs (e.g. fr,en)
+  --audio-langs LIST            Keep only these audio languages (e.g. fr,en)
+  --sub-langs LIST              Keep only these subtitle languages (e.g. fr,en)
+                                Untagged/undefined tracks are always kept.
+  --copy-streams, --remux       Don't re-encode: just remux and keep selected
+                                tracks (fast cleanup; pairs with --langs)
+
 SUBTITLES:
   --no-merge-subs               Don't merge adjacent .srt/.vtt files into output
 
@@ -748,6 +859,24 @@ parse_args() {
                 ;;
             --no-merge-subs)
                 merge_subs=false
+                shift
+                ;;
+            --langs|--lang)
+                # Shortcut: apply to both audio and subtitles (unless already set)
+                [[ -z "$audio_langs" ]] && audio_langs="$2"
+                [[ -z "$sub_langs" ]] && sub_langs="$2"
+                shift 2
+                ;;
+            --audio-langs|--audio-lang)
+                audio_langs="$2"
+                shift 2
+                ;;
+            --sub-langs|--sub-lang)
+                sub_langs="$2"
+                shift 2
+                ;;
+            --copy-streams|--remux)
+                copy_streams=true
                 shift
                 ;;
             -l|--log)
@@ -910,6 +1039,128 @@ resolve_output_path() {
 }
 
 # ==============================================================================
+# Track selection (mapping + language filtering)
+# ==============================================================================
+
+# Populated by compute_track_selection()
+TRACKSEL_MAP_ARGS=()
+TRACKSEL_COVER_POS=()   # output video-stream positions to copy verbatim (cover art)
+TRACKSEL_AUDIO_IDX=()   # input indices of kept audio streams, in output order
+declare -A TRACKSEL_AUDIO_CH=()   # input index -> channel count
+declare -A TRACKSEL_AUDIO_BR=()   # input index -> bitrate (bit/s)
+TRACKSEL_A_TOTAL=0
+TRACKSEL_A_KEPT=0
+TRACKSEL_S_TOTAL=0
+TRACKSEL_S_KEPT=0
+TRACKSEL_AUDIO_FALLBACK=false
+
+# Decide which streams to map and which video streams are attached_pic covers.
+# Without a language filter, keeps everything (-map 0). With a filter, builds
+# explicit maps that preserve video/attachments/data and keep only the audio
+# and subtitle tracks whose language matches (undefined/und always kept).
+compute_track_selection() {
+    local input="$1"
+
+    TRACKSEL_MAP_ARGS=()
+    TRACKSEL_COVER_POS=()
+    TRACKSEL_AUDIO_IDX=()
+    TRACKSEL_AUDIO_CH=()
+    TRACKSEL_AUDIO_BR=()
+    TRACKSEL_A_TOTAL=0 TRACKSEL_A_KEPT=0 TRACKSEL_S_TOTAL=0 TRACKSEL_S_KEPT=0
+    TRACKSEL_AUDIO_FALLBACK=false
+
+    local filtering=false
+    [[ -n "$audio_langs" || -n "$sub_langs" ]] && filtering=true
+
+    local -a kept_audio=() kept_sub=() all_audio=()
+    local vpos=0
+    local idx ctype lang rest
+    while IFS=, read -r idx ctype _ lang rest; do
+        [[ -z "$idx" ]] && continue
+        case "$ctype" in
+            video)
+                # Only the first video stream is the feature; any additional
+                # video stream is a cover/thumbnail (attached_pic often, but not
+                # always, flagged) — copy it rather than feed it to SVT-AV1.
+                [[ "$vpos" -ge 1 ]] && TRACKSEL_COVER_POS+=("$vpos")
+                vpos=$((vpos + 1))
+                ;;
+            audio)
+                TRACKSEL_A_TOTAL=$((TRACKSEL_A_TOTAL + 1))
+                all_audio+=("$idx")
+                if [[ -z "$audio_langs" ]] || lang_matches "$lang" "$audio_langs"; then
+                    kept_audio+=("$idx")
+                    TRACKSEL_A_KEPT=$((TRACKSEL_A_KEPT + 1))
+                fi
+                ;;
+            subtitle)
+                TRACKSEL_S_TOTAL=$((TRACKSEL_S_TOTAL + 1))
+                if [[ -z "$sub_langs" ]] || lang_matches "$lang" "$sub_langs"; then
+                    kept_sub+=("$idx")
+                    TRACKSEL_S_KEPT=$((TRACKSEL_S_KEPT + 1))
+                fi
+                ;;
+        esac
+    done < <(ffprobe -v error \
+        -show_entries stream=index,codec_type:stream_disposition=attached_pic:stream_tags=language \
+        -of csv=p=0 "$input" 2>/dev/null)
+
+    # Per-audio-stream channels and bitrate (reliable audio-only query;
+    # bit_rate may be absent — kept as 0 in that case).
+    local aidx ach abr
+    while IFS=, read -r aidx ach abr; do
+        [[ -z "$aidx" ]] && continue
+        [[ "$ach" =~ ^[0-9]+$ ]] || ach=2
+        abr="${abr//[!0-9]/}"
+        TRACKSEL_AUDIO_CH[$aidx]="$ach"
+        TRACKSEL_AUDIO_BR[$aidx]="${abr:-0}"
+    done < <(ffprobe -v error -select_streams a \
+        -show_entries stream=index,channels,bit_rate -of csv=p=0 "$input" 2>/dev/null)
+
+    if ! $filtering; then
+        TRACKSEL_MAP_ARGS=(-map 0)
+        TRACKSEL_AUDIO_IDX=("${all_audio[@]+"${all_audio[@]}"}")
+        return
+    fi
+
+    # Explicit mapping: keep all video (main + covers), attachments and data.
+    TRACKSEL_MAP_ARGS=(-map 0:v)
+
+    # Audio
+    if [[ -n "$audio_langs" ]]; then
+        if [[ "$TRACKSEL_A_TOTAL" -gt 0 && "$TRACKSEL_A_KEPT" -eq 0 ]]; then
+            # Safety net: never produce a file with no audio
+            TRACKSEL_AUDIO_FALLBACK=true
+            TRACKSEL_A_KEPT="$TRACKSEL_A_TOTAL"
+            TRACKSEL_MAP_ARGS+=(-map "0:a?")
+            TRACKSEL_AUDIO_IDX=("${all_audio[@]+"${all_audio[@]}"}")
+        else
+            local i
+            for i in "${kept_audio[@]+"${kept_audio[@]}"}"; do
+                TRACKSEL_MAP_ARGS+=(-map "0:$i")
+            done
+            TRACKSEL_AUDIO_IDX=("${kept_audio[@]+"${kept_audio[@]}"}")
+        fi
+    else
+        TRACKSEL_MAP_ARGS+=(-map "0:a?")
+        TRACKSEL_AUDIO_IDX=("${all_audio[@]+"${all_audio[@]}"}")
+    fi
+
+    # Subtitles
+    if [[ -n "$sub_langs" ]]; then
+        local i
+        for i in "${kept_sub[@]+"${kept_sub[@]}"}"; do
+            TRACKSEL_MAP_ARGS+=(-map "0:$i")
+        done
+    else
+        TRACKSEL_MAP_ARGS+=(-map "0:s?")
+    fi
+
+    # Keep attachments (subtitle fonts) and data streams
+    TRACKSEL_MAP_ARGS+=(-map "0:t?" -map "0:d?")
+}
+
+# ==============================================================================
 # Build ffmpeg command
 # ==============================================================================
 
@@ -945,8 +1196,14 @@ build_ffmpeg_cmd() {
     # at a higher level. The temp file from mktemp must be overwritable.
     _cmd+=(-y)
 
-    # Mapping: map all streams from the main input
-    _cmd+=(-map 0 -map_metadata 0 -map_chapters 0)
+    # Mapping: compute which streams to keep (all by default; filtered by
+    # language when --langs/--audio-langs/--sub-langs is set). Also identifies
+    # attached_pic cover streams so they are copied instead of re-encoded.
+    compute_track_selection "$input"
+    if $TRACKSEL_AUDIO_FALLBACK; then
+        warn "No audio track matched languages [${audio_langs}] — keeping all audio: $(basename "$input")"
+    fi
+    _cmd+=("${TRACKSEL_MAP_ARGS[@]}" -map_metadata 0 -map_chapters 0)
 
     # Map subtitle inputs
     if $merge_subs && [[ "${sub_count:-0}" -gt 0 ]]; then
@@ -965,6 +1222,15 @@ build_ffmpeg_cmd() {
         debug "Embedding description from: $desc_file"
     fi
 
+    # Remux-only mode: copy every stream verbatim (just strip unwanted tracks).
+    if $copy_streams; then
+        [[ -n "$max_res" ]] && warn "--copy-streams ignores --max-res (no video re-encode)"
+        _cmd+=(-c copy)
+        info "  Remux only: copying all kept streams (no re-encode)"
+        _cmd+=(-max_muxing_queue_size 4096 -progress pipe:1 -nostats "$output")
+        return
+    fi
+
     # Fix invalid color metadata that SVT-AV1 rejects
     local color_matrix
     color_matrix=$(ffprobe -v error -select_streams v:0 \
@@ -975,44 +1241,59 @@ build_ffmpeg_cmd() {
         debug "Fixing invalid/missing color metadata -> BT.709"
     fi
 
-    # Video codec
+    # Video codec — encode the main video stream to AV1; copy any attached_pic
+    # cover streams verbatim (SVT-AV1 cannot encode a single-frame cover).
     local -a svt_opts
     read -ra svt_opts <<< "$svtav1_options"
     _cmd+=(-c:v libsvtav1 "${svt_opts[@]}" -b:v 0)
+    local cpos
+    for cpos in "${TRACKSEL_COVER_POS[@]+"${TRACKSEL_COVER_POS[@]}"}"; do
+        _cmd+=(-c:v:"$cpos" copy)
+        debug "Copying cover art (output video stream $cpos) instead of encoding"
+    done
 
-    # Scaling
+    # Scaling — only the main video stream (v:0), never the cover art
     if [[ -n "$max_res" ]]; then
         local height
         height=$(get_video_height "$input")
         if [[ "$height" -gt "$max_res" ]]; then
-            _cmd+=(-vf "scale=-2:${max_res}")
+            _cmd+=(-filter:v:0 "scale=-2:${max_res}")
             info "  Scaling: ${height}p -> ${max_res}p"
         fi
     fi
 
-    # Audio codec
-    local do_opus=false
-    if [[ "$audio_mode" == "opus" ]]; then
-        do_opus=true
-    elif [[ "$audio_mode" == "auto" ]]; then
-        local src_audio_br
-        src_audio_br=$(get_audio_bitrate_kbps "$input")
-        if [[ "$src_audio_br" -gt "$audio_bitrate_threshold" ]]; then
-            do_opus=true
-            debug "Audio bitrate ${src_audio_br} kb/s > threshold ${audio_bitrate_threshold} kb/s, re-encoding to Opus"
+    # Audio codec — decided per stream so multichannel layouts (5.1/7.1) keep
+    # their native channel count. No -ac is set, so libopus never downmixes.
+    local aj=0 opus_count=0 copy_count=0
+    local a_idx a_ch a_br a_kbps this_opus opus_br
+    for a_idx in "${TRACKSEL_AUDIO_IDX[@]+"${TRACKSEL_AUDIO_IDX[@]}"}"; do
+        a_ch="${TRACKSEL_AUDIO_CH[$a_idx]:-2}"
+        a_br="${TRACKSEL_AUDIO_BR[$a_idx]:-0}"
+        a_kbps=$(( a_br / 1000 ))
+        this_opus=false
+        case "$audio_mode" in
+            opus) this_opus=true ;;
+            auto) [[ "$a_kbps" -gt "$audio_bitrate_threshold" ]] && this_opus=true ;;
+        esac
+        if $this_opus; then
+            opus_br=$(get_opus_bitrate "$a_ch")
+            _cmd+=(-c:a:"$aj" libopus -b:a:"$aj" "$opus_br")
+            # Normalise non-standard surround layouts (e.g. 5.1(side)) so libopus
+            # accepts them; channel count is preserved (no downmix).
+            local a_layout
+            a_layout=$(opus_channel_layout "$a_ch")
+            [[ -n "$a_layout" ]] && _cmd+=(-filter:a:"$aj" "aformat=channel_layouts=$a_layout")
+            opus_count=$((opus_count + 1))
         else
-            debug "Audio bitrate ${src_audio_br} kb/s <= threshold, copying as-is"
+            _cmd+=(-c:a:"$aj" copy)
+            copy_count=$((copy_count + 1))
         fi
-    fi
-
-    if $do_opus; then
-        local channels opus_br
-        channels=$(get_audio_channels "$input")
-        opus_br=$(get_opus_bitrate "$channels")
-        _cmd+=(-c:a libopus -b:a "$opus_br" -ac "$channels")
-        info "  Audio: re-encoding to Opus ${opus_br} (${channels}ch)"
-    else
-        _cmd+=(-c:a copy)
+        aj=$((aj + 1))
+    done
+    if [[ "$opus_count" -gt 0 ]]; then
+        info "  Audio: ${opus_count} track(s) -> Opus (native channels preserved), ${copy_count} copied"
+    elif [[ "$aj" -gt 0 ]]; then
+        info "  Audio: ${copy_count} track(s) copied as-is"
     fi
 
     # Copy other non-audio/video streams
@@ -1038,19 +1319,22 @@ run_progress_monitor() {
     local input_size="$4"
     local pid_file="${5:-}"
     local abort_signal="${6:-}"
+    local total_frames="${7:-0}"
     local abort_checked=false
 
-    local out_time_sec=0 fps_val=0
+    local out_time_sec=0 fps_val=0 cur_frame=0
 
     if ! $no_progress; then
-        printf "\r  [  0%%] [------------------------------] encoding..."
+        printf "\r  [  0%%] [------------------------------] working..."
     fi
 
     while IFS='=' read -r key val; do
         case "$key" in
             out_time_us)
-                [[ -z "$val" || "$val" == "N/A" ]] && continue
-                out_time_sec=$((val / 1000000))
+                [[ -n "$val" && "$val" != "N/A" ]] && out_time_sec=$((val / 1000000))
+                ;;
+            frame)
+                [[ "$val" =~ ^[0-9]+$ ]] && cur_frame="$val"
                 ;;
             fps)
                 fps_val="${val:-0}"
@@ -1069,33 +1353,47 @@ run_progress_monitor() {
                 ;;
         esac
 
-        # Only update display on out_time_us
-        [[ "$key" != "out_time_us" ]] && continue
-        [[ "$duration" -le 0 || "$out_time_sec" -le 0 ]] && continue
+        # Redraw on a timestamp update (encode) or a frame update (stream copy,
+        # where ffmpeg reports out_time as N/A but still counts muxed frames).
+        [[ "$key" != "out_time_us" && "$key" != "frame" ]] && continue
+
+        # Current position in seconds: prefer real out_time; fall back to the
+        # muxed-frame fraction of the total duration for stream-copy remux.
+        local pos_sec=0
+        if [[ "$out_time_sec" -gt 0 ]]; then
+            pos_sec="$out_time_sec"
+        elif [[ "$total_frames" -gt 0 && "$cur_frame" -gt 0 ]]; then
+            pos_sec=$(( cur_frame * duration / total_frames ))
+        fi
+        [[ "$duration" -le 0 || "$pos_sec" -le 0 ]] && continue
 
         local now elapsed speed_x progress_pct
         now=$(date +%s)
         elapsed=$((now - start_time))
         [[ "$elapsed" -le 0 ]] && continue
 
-        speed_x=$(echo "scale=2; $out_time_sec / $elapsed" | bc -l 2>/dev/null || echo "0")
+        speed_x=$(echo "scale=2; $pos_sec / $elapsed" | bc -l 2>/dev/null || echo "0")
         # bc omits leading zero: .33 -> 0.33
         [[ "$speed_x" == .* ]] && speed_x="0${speed_x}"
-        progress_pct=$(( (out_time_sec * 100) / duration ))
+        progress_pct=$(( (pos_sec * 100) / duration ))
         [[ "$progress_pct" -gt 100 ]] && progress_pct=100
 
         local eta_str="?"
-        if [[ "$out_time_sec" -gt 0 && "$elapsed" -gt 0 ]]; then
+        if [[ "$pos_sec" -gt 0 && "$elapsed" -gt 0 ]]; then
             local eta_secs
-            eta_secs=$(echo "scale=0; ($duration - $out_time_sec) * $elapsed / $out_time_sec" | bc 2>/dev/null || echo "0")
+            eta_secs=$(echo "scale=0; ($duration - $pos_sec) * $elapsed / $pos_sec" | bc 2>/dev/null || echo "0")
             if [[ "$eta_secs" =~ ^[0-9]+$ ]]; then
                 eta_str=$(format_duration "$eta_secs")
             fi
         fi
 
         # -- Early abort check (at threshold, retries if temp file not yet written)
+        # Gated on the real-timestamp progress only (never the frame-count
+        # fallback), so the size estimate below is taken at a reliable point.
+        local time_pct=0
+        [[ "$out_time_sec" -gt 0 ]] && time_pct=$(( out_time_sec * 100 / duration ))
         if $early_abort && ! $abort_checked && \
-           [[ "$progress_pct" -ge "$early_abort_threshold" ]] && \
+           [[ "$time_pct" -ge "$early_abort_threshold" ]] && \
            ($remove_if_bigger || $keep_best_version); then
 
             local current_output_size estimated_final_size
@@ -1106,6 +1404,8 @@ run_progress_monitor() {
                 if [[ "$current_output_size" -le 0 ]]; then
                     : # retry on next progress update
                 elif [[ "$out_time_sec" -gt 0 ]]; then
+                    # Early abort is an encode-only decision; base the size
+                    # estimate on real timestamps, never the frame-count fallback.
                     abort_checked=true
                     estimated_final_size=$(( current_output_size * duration / out_time_sec ))
                     if [[ "$estimated_final_size" -ge "$input_size" ]]; then
@@ -1135,19 +1435,19 @@ run_progress_monitor() {
             empty=$(( 30 - filled ))
             bar=$(printf "%${filled}s" | tr ' ' '#')$(printf "%${empty}s" | tr ' ' '-')
 
-            current_time=$(format_duration "$out_time_sec")
+            current_time=$(format_duration "$pos_sec")
             total_time=$(format_duration "$duration")
 
             # Output bitrate and estimated gain from temp file size
             local extra_str=""
-            if [[ -f "$temp_file" && "$out_time_sec" -gt 0 ]]; then
+            if [[ -f "$temp_file" && "$pos_sec" -gt 0 ]]; then
                 local cur_sz out_br_kbps
                 cur_sz=$(stat -c %s "$temp_file" 2>/dev/null || echo 0)
-                out_br_kbps=$(( cur_sz * 8 / out_time_sec / 1000 ))
+                out_br_kbps=$(( cur_sz * 8 / pos_sec / 1000 ))
                 extra_str=" | ${out_br_kbps}kb/s"
                 if [[ "$input_size" -gt 0 ]]; then
                     local est_sz saving_pct cmp_color
-                    est_sz=$(( cur_sz * duration / out_time_sec ))
+                    est_sz=$(( cur_sz * duration / pos_sec ))
                     saving_pct=$(( (input_size - est_sz) * 100 / input_size ))
                     if [[ "$saving_pct" -ge 0 ]]; then
                         cmp_color="$GREEN"
@@ -1190,7 +1490,8 @@ convert_file() {
         return 0
     fi
 
-    if is_av1 "$input_file"; then
+    # In remux mode we may want to clean an already-AV1 file, so don't skip it.
+    if ! $copy_streams && is_av1 "$input_file"; then
         info "  Already AV1, skipping: $input_file"
         add_result "$input_file" "SKIPPED" "$input_size" 0 "already AV1"
         return 0
@@ -1228,9 +1529,17 @@ convert_file() {
             subs=$(find_subtitle_files "$input_file")
             [[ -n "$subs" ]] && sub_info=" [+subs]"
         fi
-        printf "  %-50s %8s  %-4s%s%s%s%s -> %s\n" \
+        local track_info=""
+        if [[ -n "$audio_langs" || -n "$sub_langs" ]]; then
+            compute_track_selection "$input_file"
+            local fb=""
+            $TRACKSEL_AUDIO_FALLBACK && fb="!"
+            track_info=" [audio ${TRACKSEL_A_KEPT}${fb}/${TRACKSEL_A_TOTAL}, subs ${TRACKSEL_S_KEPT}/${TRACKSEL_S_TOTAL}]"
+        fi
+        $copy_streams && track_info+=" [remux]"
+        printf "  %-50s %8s  %-4s%s%s%s%s%s -> %s\n" \
             "$input_file" "$(human_size "$input_size")" "$codec_info" \
-            "$res_info" "$ts_info" "$scale_info" "$sub_info" "$final_output"
+            "$res_info" "$ts_info" "$scale_info" "$sub_info" "$track_info" "$final_output"
         add_result "$input_file" "DRYRUN" "$input_size" 0 ""
         return 0
     fi
@@ -1290,6 +1599,10 @@ convert_file() {
     # -- Run conversion --------------------------------------------------------
     local duration
     duration=$(get_duration_secs "$input_file")
+    # Estimate total video frames (duration * fps) — used for the progress bar
+    # in stream-copy mode, where ffmpeg reports out_time as N/A.
+    local total_frames
+    total_frames=$(get_total_frames "$input_file" "$duration")
     local start_time
     start_time=$(date +%s)
 
@@ -1335,7 +1648,7 @@ convert_file() {
 
     local ffmpeg_exit=0
     { "${cmd[@]}" 2>"$stderr_log" & echo $! > "$pid_file"; wait $!; } \
-        | run_progress_monitor "$duration" "$start_time" "$temp_output" "$input_size" "$pid_file" "$abort_signal" \
+        | run_progress_monitor "$duration" "$start_time" "$temp_output" "$input_size" "$pid_file" "$abort_signal" "$total_frames" \
         || ffmpeg_exit="${PIPESTATUS[0]}"
 
     # Stop key reader and restore terminal
@@ -1748,15 +2061,28 @@ print_banner() {
     fi
 
     # Encoder
-    banner_line "encoder" "$(format_svtav1_options)"
-    [[ -n "$content_type" ]] && banner_line "content" "$content_type"
+    if $copy_streams; then
+        banner_line "encoder" "remux only (no re-encode)" "$ORANGE"
+    else
+        banner_line "encoder" "$(format_svtav1_options)"
+        [[ -n "$content_type" ]] && banner_line "content" "$content_type"
+    fi
 
     # Audio
-    case "$audio_mode" in
-        opus) banner_line "audio" "Opus (always)" ;;
-        auto) banner_line "audio" "Opus if > ${audio_bitrate_threshold} kb/s" ;;
-        *)    banner_line "audio" "copy" ;;
-    esac
+    if $copy_streams; then
+        banner_line "audio" "copy"
+    else
+        case "$audio_mode" in
+            opus) banner_line "audio" "Opus (always)" ;;
+            auto) banner_line "audio" "Opus if > ${audio_bitrate_threshold} kb/s" ;;
+            *)    banner_line "audio" "copy" ;;
+        esac
+    fi
+
+    # Language filtering (conditional)
+    if [[ -n "$audio_langs" || -n "$sub_langs" ]]; then
+        banner_line "keep langs" "audio: ${audio_langs:-all} | subs: ${sub_langs:-all}" "$ORANGE"
+    fi
 
     # Max height (conditional)
     [[ -n "$max_res" ]] && banner_line "max height" "${max_res}p" "$ORANGE"

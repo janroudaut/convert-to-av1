@@ -54,6 +54,7 @@ recursive=false
 audio_langs=""  # comma-separated language codes to keep (empty = keep all)
 sub_langs=""    # comma-separated language codes to keep (empty = keep all)
 copy_streams=false  # remux only (no re-encode), just strip/keep selected tracks
+use_profiles=true   # honor per-directory .convert-profile files
 audio_mode="auto"  # copy, opus, auto
 audio_bitrate_threshold=200  # kb/s — auto mode re-encodes above this
 min_size=0  # bytes — skip files smaller than this
@@ -79,6 +80,12 @@ FILES_PROCESSED=0
 FILES_TOTAL=0
 BATCH_SAVED_BYTES=0
 BATCH_START_TIME=0
+
+# -- Per-directory profile state -----------------------------------------------
+# Base (CLI) encoding config, snapshotted so per-file profiles start clean.
+declare -A BASE_CFG=()
+CURRENT_PROFILE_FILE=""   # path of the .convert-profile applied to current file
+CURRENT_PROFILE_TOKENS="" # its raw tokens, for display
 
 # ==============================================================================
 # SVT-AV1 preset helpers
@@ -116,6 +123,110 @@ build_svtav1_options() {
         params+=":film-grain-denoise=1"
     fi
     svtav1_options="-preset ${svt_preset} -crf ${svt_crf} -pix_fmt ${svt_pix_fmt} -svtav1-params ${params}"
+}
+
+# ==============================================================================
+# Per-directory profiles (.convert-profile)
+# ==============================================================================
+#
+# A ".convert-profile" file placed in a directory (or any parent) applies its
+# encoding/quality/audio/track flags to files under it — e.g. a folder of
+# grainy films gets "--movie", an animation folder gets "--cartoon". Resolved
+# per file (each directory can differ); explicit flags in the profile override
+# the CLI base for that file.
+
+# The CLI-level encoding config that a profile may override. Captured once so
+# each file's profile starts from the same clean base (no leakage between dirs).
+PROFILE_VARS=(svt_preset svt_crf svt_film_grain svt_film_grain_denoise svt_tune
+    svt_pix_fmt svt_enable_overlays svt_scd content_type speed_preset max_res
+    audio_mode audio_bitrate_threshold audio_langs sub_langs copy_streams)
+
+snapshot_base_config() {
+    local v
+    for v in "${PROFILE_VARS[@]}"; do
+        BASE_CFG["$v"]="${!v}"
+    done
+}
+
+restore_base_config() {
+    local v
+    for v in "${PROFILE_VARS[@]}"; do
+        printf -v "$v" '%s' "${BASE_CFG[$v]}"
+    done
+}
+
+# Walk up from a file's directory to the filesystem root; echo the first
+# .convert-profile found (empty if none).
+find_profile_file() {
+    local dir
+    dir=$(cd "$(dirname "$1")" 2>/dev/null && pwd) || return 0
+    while [[ -n "$dir" ]]; do
+        if [[ -f "$dir/.convert-profile" ]]; then
+            echo "$dir/.convert-profile"
+            return 0
+        fi
+        [[ "$dir" == "/" ]] && break
+        dir=$(dirname "$dir")
+    done
+}
+
+# Apply the subset of flags that make sense in a profile. Mirrors parse_args for
+# encoding/quality/audio/track options; ignores (with a warning) anything else.
+apply_profile_tokens() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --sd|--fast)   svt_preset=10; svt_crf=32; svt_film_grain=0; speed_preset="fast"; shift ;;
+            --hq)          svt_preset=4; svt_crf=28; svt_film_grain=8; speed_preset="hq"
+                           [[ "$audio_mode" == "auto" ]] && audio_mode="copy"; shift ;;
+            --cartoon)     content_type="cartoon"; shift ;;
+            --tv)          content_type="tv"; shift ;;
+            --movie)       content_type="movie"; shift ;;
+            --max-res|--max-h|--max-height) max_res="$2"; shift 2 ;;
+            --1080|--1080p) max_res="1080"; shift ;;
+            --720|--720p)  max_res="720"; shift ;;
+            --copy-audio)  audio_mode="copy"; shift ;;
+            --opus)        audio_mode="opus"; shift ;;
+            --auto-audio)  audio_mode="auto"; shift ;;
+            --audio-threshold) audio_bitrate_threshold="$2"; audio_mode="auto"; shift 2 ;;
+            --langs|--lang)          audio_langs="$2"; sub_langs="$2"; shift 2 ;;
+            --audio-langs|--audio-lang) audio_langs="$2"; shift 2 ;;
+            --sub-langs|--sub-lang)  sub_langs="$2"; shift 2 ;;
+            --copy-streams|--remux)  copy_streams=true; shift ;;
+            "")            shift ;;
+            *)             warn "Ignoring unsupported profile option: $1"; shift ;;
+        esac
+    done
+}
+
+# Restore the CLI base, then overlay the file's .convert-profile (if any), and
+# recompute the derived SVT options. Sets CURRENT_PROFILE_FILE/TOKENS.
+resolve_file_profile() {
+    local input_file="$1"
+    restore_base_config
+    CURRENT_PROFILE_FILE=""
+    CURRENT_PROFILE_TOKENS=""
+
+    if $use_profiles; then
+        local pf
+        pf=$(find_profile_file "$input_file")
+        if [[ -n "$pf" ]]; then
+            local -a toks=()
+            local line
+            while IFS= read -r line || [[ -n "$line" ]]; do
+                line="${line%%#*}"                 # strip comments
+                [[ -z "${line// /}" ]] && continue
+                local -a lt=()
+                read -ra lt <<< "$line"
+                toks+=("${lt[@]}")
+            done < "$pf"
+            CURRENT_PROFILE_FILE="$pf"
+            CURRENT_PROFILE_TOKENS="${toks[*]-}"
+            apply_profile_tokens "${toks[@]+"${toks[@]}"}"
+        fi
+    fi
+
+    apply_content_type
+    build_svtav1_options
 }
 
 # ==============================================================================
@@ -710,6 +821,13 @@ TRACKS (keep only selected languages; default keeps all):
   --copy-streams, --remux       Don't re-encode: just remux and keep selected
                                 tracks (fast cleanup; pairs with --langs)
 
+PROFILES:
+  A '.convert-profile' file in a directory (or any parent) applies its flags
+  to files under it — e.g. put '--movie' in a grainy-films folder, '--cartoon'
+  in an animation folder. Resolved per file; one flag per line or space-separated;
+  '#' starts a comment. Supports encoding/quality/audio/track flags.
+  --no-profile                  Ignore all .convert-profile files
+
 SUBTITLES:
   --no-merge-subs               Don't merge adjacent .srt/.vtt files into output
 
@@ -877,6 +995,10 @@ parse_args() {
                 ;;
             --copy-streams|--remux)
                 copy_streams=true
+                shift
+                ;;
+            --no-profile)
+                use_profiles=false
                 shift
                 ;;
             -l|--log)
@@ -1490,6 +1612,10 @@ convert_file() {
         return 0
     fi
 
+    # Resolve this file's encoding config (CLI base + any .convert-profile).
+    # Done before the AV1 skip so a profile can enable --copy-streams cleanup.
+    resolve_file_profile "$input_file"
+
     # In remux mode we may want to clean an already-AV1 file, so don't skip it.
     if ! $copy_streams && is_av1 "$input_file"; then
         info "  Already AV1, skipping: $input_file"
@@ -1537,6 +1663,7 @@ convert_file() {
             track_info=" [audio ${TRACKSEL_A_KEPT}${fb}/${TRACKSEL_A_TOTAL}, subs ${TRACKSEL_S_KEPT}/${TRACKSEL_S_TOTAL}]"
         fi
         $copy_streams && track_info+=" [remux]"
+        [[ -n "$CURRENT_PROFILE_FILE" ]] && track_info+=" [profile: ${CURRENT_PROFILE_TOKENS}]"
         printf "  %-50s %8s  %-4s%s%s%s%s%s -> %s\n" \
             "$input_file" "$(human_size "$input_size")" "$codec_info" \
             "$res_info" "$ts_info" "$scale_info" "$sub_info" "$track_info" "$final_output"
@@ -1564,6 +1691,9 @@ convert_file() {
     echo ""
     echo -e "${BOLD}${batch_info}<- SOURCE ($(human_size "$input_size")): '${input_file}'${NC}"
     echo -e "${BOLD}-> TARGET: '${final_output}'${NC}"
+    if [[ -n "$CURRENT_PROFILE_FILE" ]]; then
+        echo -e "  ${ORANGE}profile: ${CURRENT_PROFILE_TOKENS} (from $(basename "$(dirname "$CURRENT_PROFILE_FILE")")/.convert-profile)${NC}"
+    fi
     print_file_info "$input_file"
     if $merge_subs; then
         local ext_subs
@@ -2112,6 +2242,9 @@ print_banner() {
     # Subtitles (conditional — only shown if enabled)
     $merge_subs && banner_line "subtitles" "merge .srt/.vtt"
 
+    # Per-directory profiles (shown unless disabled)
+    $use_profiles && banner_line "profiles" ".convert-profile (per dir)"
+
     # Batch options (conditional)
     [[ -n "$sort_by_size" ]] && banner_line "sort" "$sort_by_size"
     [[ "$min_size" -gt 0 ]] && banner_line "min size" "$(human_size "$min_size")"
@@ -2130,6 +2263,9 @@ print_banner() {
 
 main() {
     parse_args "$@"
+    # Snapshot the CLI encoding config before deriving options, so per-file
+    # .convert-profile resolution always starts from a clean base.
+    snapshot_base_config
     apply_content_type
     build_svtav1_options
     check_dependencies

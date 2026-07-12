@@ -278,8 +278,13 @@ section "Smart mode"
 test_smart_keeps_smaller() {
     local dir="$TEST_DIR/smart"
     mkdir -p "$dir"
-    # Use high bitrate source so AV1 is much smaller
-    generate_video "$dir/big.mp4" 5 640x480
+    # High-bitrate 720p source so AV1 is deterministically much smaller. A
+    # low-bitrate source sits at the compression boundary where early-abort
+    # legitimately fires at random, which made this test flaky.
+    ffmpeg -y -f lavfi -i "testsrc=duration=5:size=1280x720:rate=25" \
+        -f lavfi -i "sine=frequency=440:duration=5" \
+        -c:v libx264 -preset ultrafast -crf 8 -c:a aac -b:a 128k \
+        -pix_fmt yuv420p "$dir/big.mp4" 2>/dev/null
 
     "$CONVERT" --no-progress --smart --fast "$dir/big.mp4" >/dev/null 2>&1 && rc=0 || rc=$?
 
@@ -666,6 +671,50 @@ test_metadata_preserved() {
     fi
 }
 test_metadata_preserved
+
+# --- Per-directory profiles ---
+
+section "Per-directory profiles"
+
+# A profile in a parent dir must apply to a file in a subdir (walk-up); --720
+# is used because the result (output height) is directly verifiable.
+test_profile_applies() {
+    local dir="$TEST_DIR/profile"
+    mkdir -p "$dir/Season 01"
+    printf '%s\n' '# force 720p for this folder' '--720' > "$dir/.convert-profile"
+    generate_video "$dir/Season 01/ep.mp4" 3 1920x1080
+
+    "$CONVERT" --no-progress --fast "$dir/Season 01/ep.mp4" >/dev/null 2>&1 && rc=0 || rc=$?
+
+    local height
+    height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height \
+        -of csv=p=0 "$dir/Season 01/ep.mkv" 2>/dev/null | head -1 | tr -d '[:space:]')
+    if [[ $rc -eq 0 ]] && [[ "${height:-0}" -le 720 ]] && [[ "${height:-0}" -gt 0 ]]; then
+        pass ".convert-profile in parent dir applies (scaled to ${height}p)"
+    else
+        fail "profile applies" "height ${height}, expected <= 720 (exit $rc)"
+    fi
+}
+test_profile_applies
+
+test_no_profile_flag() {
+    local dir="$TEST_DIR/profile-off"
+    mkdir -p "$dir"
+    printf '%s\n' '--720' > "$dir/.convert-profile"
+    generate_video "$dir/ep.mp4" 3 1920x1080
+
+    "$CONVERT" --no-progress --fast --no-profile "$dir/ep.mp4" >/dev/null 2>&1 && rc=0 || rc=$?
+
+    local height
+    height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height \
+        -of csv=p=0 "$dir/ep.mkv" 2>/dev/null | head -1 | tr -d '[:space:]')
+    if [[ $rc -eq 0 ]] && [[ "${height:-0}" -eq 1080 ]]; then
+        pass "--no-profile ignores .convert-profile (stays ${height}p)"
+    else
+        fail "no-profile flag" "height ${height}, expected 1080 (exit $rc)"
+    fi
+}
+test_no_profile_flag
 
 # --- File filtering ---
 

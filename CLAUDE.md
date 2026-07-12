@@ -40,6 +40,13 @@ ffmpeg (with libsvtav1), ffprobe, python3, bc, numfmt, stat, mktemp
   already-AV1 skip so AV1 files can still be cleaned. In `-c copy` mode ffmpeg
   reports `out_time=N/A`, so the progress bar falls back to muxed-frame count
   (`get_total_frames`); early-abort stays gated on real timestamps only (encode)
+- Per-directory `.convert-profile`: encoding/quality/audio/track flags applied
+  per file by walking up from its dir (`resolve_file_profile`). CLI config is
+  snapshotted (`snapshot_base_config`/`BASE_CFG`) and restored per file so
+  profiles don't leak between directories. `--no-profile` disables. Auto content
+  detection was tried and rejected — grain confounds with detail AND motion
+  (Die Hard 1988 scored like clean digital), so profiles are the deliberate,
+  reliable alternative
 
 ## Code Style
 - All code, comments, CLI output, and docs must be in English

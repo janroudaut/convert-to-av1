@@ -13,6 +13,7 @@ Batch video converter to AV1 using FFmpeg and SVT-AV1. Designed to reduce storag
 - **Audio re-encoding** — optional Opus re-encoding with automatic bitrate detection; decided **per stream**, so 5.1/7.1 tracks keep their native channels (no downmix)
 - **Language track filtering** — keep only selected audio/subtitle languages (e.g. `fr,en`) to strip unwanted tracks
 - **Remux / cleanup mode** — `--copy-streams` strips tracks without re-encoding (fast)
+- **Per-directory profiles** — a `.convert-profile` file applies folder-specific flags (e.g. `--movie` for grainy films, `--cartoon` for animation)
 - **Cover art safe** — attached_pic covers/thumbnails are preserved (copied), never fed to the encoder
 - **Resolution scaling** — downscale to 1080p, 720p, or any custom height
 - **Recursive mode** — process entire directory trees
@@ -215,6 +216,31 @@ Keep only tracks in the languages you care about. By default **all tracks are ke
 ./convert-to-av1.sh --copy-streams --langs fr,en video.mkv
 ```
 
+### Per-directory profiles
+
+Drop a `.convert-profile` file into a directory (or any parent) and its flags are applied to every video under it — so you can set the right profile per content type without passing flags each time. This is more reliable than trying to auto-detect content: you know a folder is animation or grainy film, a heuristic doesn't.
+
+| Flag | Description |
+|------|-------------|
+| `--no-profile` | Ignore all `.convert-profile` files |
+
+- Resolved **per file**: the tool walks up from each file's directory and uses the first `.convert-profile` it finds.
+- One flag per line or space-separated; `#` starts a comment.
+- Supports the encoding/quality/audio/track flags (`--movie`, `--cartoon`, `--tv`, `--hq`, `--fast`, `--1080`, `--opus`, `--langs`, `--copy-streams`, …). Batch/output flags (`-o`, `-r`, `--smart`, …) are ignored in profiles.
+- Profile flags override the CLI base for that file.
+
+```bash
+# /mnt/videos/Movies/Die Hard (1988)/.convert-profile
+--movie
+
+# /mnt/videos/Series/South Park/.convert-profile   (applies to all seasons below)
+# 2D animation: no grain, a touch higher CRF
+--cartoon
+
+# Then just run the batch — each folder gets its own profile automatically:
+./convert-to-av1.sh --smart -r /mnt/videos/
+```
+
 ### Subtitles
 
 | Flag | Description |
@@ -290,6 +316,19 @@ OK: 1 | Skip: 1 | Abort: 0 | Fail: 1 | Total: 3 | elapsed: 00:48:12
 Input: `mp4`, `mkv`, `avi`, `mov`, `wmv`, `flv`, `ts`, `m2ts`, `mts`, `m4v`, `webm`, `mpg`, `mpeg`
 
 Output: MKV (Matroska) — chosen for its broad codec and subtitle support.
+
+## Acknowledgements
+
+First and foremost, to the **FFmpeg** developers, and to the **assembly masters**
+whose hand-written SIMD makes real-time video possible — the people optimizing
+dav1d, SVT-AV1, x264/x265 and countless codecs one instruction at a time. This
+tool is just a shell script standing on those giants' shoulders.
+
+```
+virtualdub-grade artistry: not found.
+bytes shaved: yes. verdict: watchable.
+with respect to those who did it properly.
+```
 
 ## License
 

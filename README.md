@@ -149,16 +149,16 @@ convert-to-av1 [options] FILES[...]
 
 Speed presets (`--fast`, default, `--hq`) and content presets (`--cartoon`, `--tv`, `--movie`) are combinable in any order: `--fast --cartoon`, `--hq --movie`, etc.
 
-Default: preset 8, CRF 30, 10-bit, no film-grain.
+Default: preset 8, CRF 28, 10-bit, no film-grain.
 
 #### Preset matrix
 
 | | `--fast` | default | `--hq` |
 |---|---|---|---|
-| *(none)* | p10 crf32 | p8 crf30 | p4 crf28 grain=8 |
-| `--cartoon` | p10 crf34 | p8 crf32 | p4 crf30 |
-| `--tv` | p10 crf33 | p10 crf31 | p10 crf29 |
-| `--movie` | p10 crf30 grain=8 denoise | p8 crf28 grain=10 denoise | p4 crf26 grain=10 denoise |
+| *(none)* | p10 crf32 | p8 crf28 | p4 crf28 grain=8 |
+| `--cartoon` | p10 crf34 | p8 crf30 | p4 crf30 |
+| `--tv` | p10 crf33 | p10 crf29 | p10 crf29 |
+| `--movie` | p10 crf30 grain=8 denoise | p8 crf26 grain=10 denoise | p4 crf26 grain=10 denoise |
 
 All presets use 10-bit encoding, enable-overlays, and scene-change detection. Film-grain synthesis is only enabled for `--hq` (alone) and `--movie` — it improves perceived quality for film content but has a significant performance cost (~3.5x slower). `--movie` also enables `film-grain-denoise` to preserve and re-synthesize grain from the source.
 

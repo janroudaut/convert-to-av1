@@ -31,7 +31,7 @@ max_res=""
 
 # -- SVT-AV1 encoding parameters (decomposed for content-type presets) ---------
 svt_preset=8
-svt_crf=30
+svt_crf=28
 svt_film_grain=0
 svt_film_grain_denoise=0
 svt_tune=0

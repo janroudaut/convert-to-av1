@@ -255,27 +255,34 @@ Adjacent `.txt` files are embedded as MKV `description` metadata but are **never
 
 ## Example output
 
-```
-<- SOURCE (2.5G): 'recording.ts'
--> TARGET: 'recording.mkv'
-  container: mpegts  duration: 01:03:58  bitrate: 5281 kb/s
-    #0 video: h264 1920x1080
-  #1 audio: aac 2ch 48000Hz 97kb/s
-  +sub: recording.fr.srt
-  +desc: recording.txt
-  [ 45%] [#############-----------------] 00:28:47/01:03:58 | 1.2x | ETA: 1770s | fps: 30.1
-```
+Per-file, while converting (here with `--langs fr,en`, so only French/English tracks are kept):
 
 ```
-File                                               Status          Input     Output     Gain  Note
+<- SOURCE (7.2G): 'S01E05 - Got Milk.mkv'
+-> TARGET: 'S01E05 - Got Milk.mkv'
+  container: matroska,webm  duration: 00:56:28  bitrate: 22287 kb/s
+    #0 video: hevc [eng] 1920x1080 23.98fps
+  #3 audio: eac3 [eng] 6ch 48000Hz 768kb/s
+  #9 audio: eac3 [fre] 6ch 48000Hz 768kb/s
+  #43 subtitle: subrip [fre]
+  #50 subtitle: subrip [eng]
+  Audio: 6 track(s) -> Opus (native channels preserved), 0 copied
+  [ 45%] [#############-----------------] 00:25:24/00:56:28 | fps: 42.1 1.9x | ETA: 00:16:20 | 2870kb/s saved=61%
+  Conversion done.
+  saved=4.4G (61%): 7.2G -> 2.8G
+```
+
+End-of-batch summary table:
+
+```
+File                                               Status          Input     Output    Saved  Note
 -------------------------------------------------- ---------- ---------- ---------- --------  ----
-recording.ts                                       OK               2.4G       1.1G     -54%  -54%
-episode_s01e01.mp4                                 OK               1.8G       890M     -51%  -51%
+S01E05 - Got Milk.mkv                              OK               7.2G       2.8G      61%  saved 61% (4.4G)
 already_av1.mkv                                    SKIPPED          500M        ---      ---  already AV1
 broken_file.avi                                    FAILED           200M        ---      ---  ffmpeg exit 1
 
-Total converted: 4.2G -> 2.0G (-52%)
-OK: 2 | Skip: 1 | Abort: 0 | Fail: 1 | Total: 4
+Total: 7.9G -> 2.8G | saved=5.1G (65%)
+OK: 1 | Skip: 1 | Abort: 0 | Fail: 1 | Total: 3 | elapsed: 00:48:12
 ```
 
 ## Supported formats

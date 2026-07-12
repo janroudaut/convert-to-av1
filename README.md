@@ -10,7 +10,10 @@ Batch video converter to AV1 using FFmpeg and SVT-AV1. Designed to reduce storag
 - **Early abort** — stops encoding at ~8% if the output is estimated to be larger than the source
 - **Subtitle merging** — auto-detects adjacent `.srt`/`.vtt` files (including multi-language) and muxes them into the output MKV
 - **Description embedding** — reads adjacent `.txt` files and embeds them as MKV `description` metadata
-- **Audio re-encoding** — optional Opus re-encoding with automatic bitrate detection
+- **Audio re-encoding** — optional Opus re-encoding with automatic bitrate detection; decided **per stream**, so 5.1/7.1 tracks keep their native channels (no downmix)
+- **Language track filtering** — keep only selected audio/subtitle languages (e.g. `fr,en`) to strip unwanted tracks
+- **Remux / cleanup mode** — `--copy-streams` strips tracks without re-encoding (fast)
+- **Cover art safe** — attached_pic covers/thumbnails are preserved (copied), never fed to the encoder
 - **Resolution scaling** — downscale to 1080p, 720p, or any custom height
 - **Recursive mode** — process entire directory trees
 - **Sort by size** — process smallest (or largest) files first
@@ -59,6 +62,12 @@ Verify your setup:
 
 # High quality encoding
 ./convert-to-av1.sh --hq .
+
+# Keep only French and English audio + subtitles (drop the rest)
+./convert-to-av1.sh --smart --langs fr,en -r /path/to/series/
+
+# Just clean up an existing file: strip unwanted tracks, no re-encoding
+./convert-to-av1.sh --copy-streams --langs fr,en video.mkv
 
 # Preview what would be done
 ./convert-to-av1.sh --dry-run --sort-by-size .
@@ -175,6 +184,37 @@ All presets use 10-bit encoding, enable-overlays, and scene-change detection. Fi
 | `--auto-audio` | Re-encode to Opus only if source bitrate exceeds threshold (default) |
 | `--audio-threshold KB/S` | Bitrate threshold for `--auto-audio` (default: 200) |
 
+The audio codec is chosen **per stream**: no global channel remapping is applied, so multichannel tracks (5.1/7.1) keep their native channel count — Opus re-encoding never downmixes surround to stereo. Non-standard channel layouts (e.g. `5.1(side)`) are normalised so `libopus` accepts them.
+
+### Tracks (language filtering)
+
+Keep only tracks in the languages you care about. By default **all tracks are kept**. Filtering is opt-in and identifies tracks by their language tag (accepts 2- or 3-letter codes: `fr` matches `fre`/`fra`, `en` matches `eng`).
+
+| Flag | Description |
+|------|-------------|
+| `--langs LIST` | Keep only these languages for **both** audio and subtitles (e.g. `fr,en`) |
+| `--audio-langs LIST` | Keep only these audio languages |
+| `--sub-langs LIST` | Keep only these subtitle languages |
+| `--copy-streams, --remux` | Don't re-encode: just remux and keep selected tracks (fast cleanup) |
+
+- **Untagged / `und` tracks are always kept** (safety against dropping audio).
+- If no audio track matches, **all audio is kept** and a warning is printed (a file is never left without sound).
+- All tracks in a matching language are kept (default, forced, commentary, etc.).
+- Video (including cover art), attachments/fonts, chapters, and metadata are always preserved.
+
+`--copy-streams` performs a pure remux (`-c copy`) — no video or audio re-encoding — which is ideal for stripping unwanted tracks from an existing file in seconds. It also works on files that are already AV1 (which normal conversion would skip).
+
+```bash
+# Strip everything except French/English audio and subtitles, re-encode video to AV1
+./convert-to-av1.sh --langs fr,en video.mkv
+
+# Fine-grained: keep only French audio, but French + English subtitles
+./convert-to-av1.sh --audio-langs fr --sub-langs fr,en video.mkv
+
+# Clean an existing file without re-encoding (fast)
+./convert-to-av1.sh --copy-streams --langs fr,en video.mkv
+```
+
 ### Subtitles
 
 | Flag | Description |
@@ -204,13 +244,14 @@ Adjacent `.txt` files are embedded as MKV `description` metadata but are **never
 ## How it works
 
 1. **Probe** — reads container format, streams, duration, and codec info
-2. **Skip** — if the video is already AV1, skip it
+2. **Skip** — if the video is already AV1, skip it (unless `--copy-streams`, which can still clean it)
 3. **MPEG-TS fix** — if the container is MPEG-TS, applies `-fflags +genpts+igndts -avoid_negative_ts make_zero`
 4. **Merge** — detects and includes adjacent subtitle/description files
-5. **Encode** — runs FFmpeg with SVT-AV1, piping progress to a real-time monitor
-6. **Early abort** — at the configured threshold (default 8%), estimates final output size; aborts if it would be larger than input (only when `--smart` or `--rm-if-bigger`)
-7. **Post-process** — handles smart mode logic, source removal, in-place file swap; detects corrupt outputs (< 1 KiB)
-8. **Summary** — prints a table of all results with sizes and savings
+5. **Select tracks** — keeps all streams by default, or filters audio/subtitles by language; only the first video stream is encoded to AV1 while cover-art/thumbnail streams are copied verbatim
+6. **Encode** — runs FFmpeg with SVT-AV1 (per-stream audio codec), piping progress to a real-time monitor
+7. **Early abort** — at the configured threshold (default 8%), estimates final output size; aborts if it would be larger than input (only when `--smart` or `--rm-if-bigger`)
+8. **Post-process** — handles smart mode logic, source removal, in-place file swap; detects corrupt outputs (< 1 KiB)
+9. **Summary** — prints a table of all results with sizes and savings
 
 ## Example output
 

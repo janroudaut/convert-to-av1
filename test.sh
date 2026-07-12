@@ -117,6 +117,46 @@ generate_ts_video() {
         "$out" 2>/dev/null
 }
 
+# Generate an MKV with multiple audio languages (eng stereo, fre 5.1, spa stereo)
+# and embedded eng/fre subtitles.
+generate_multitrack_video() {
+    local out="$1" dur="${2:-2}"
+    local sub_en="${out}.en.srt" sub_fr="${out}.fr.srt"
+    printf '1\n00:00:00,000 --> 00:00:01,000\nhello\n' > "$sub_en"
+    printf '1\n00:00:00,000 --> 00:00:01,000\nbonjour\n' > "$sub_fr"
+    ffmpeg -y \
+        -f lavfi -i "testsrc=duration=${dur}:size=320x240:rate=25" \
+        -f lavfi -i "sine=frequency=440:duration=${dur}" \
+        -f lavfi -i "sine=frequency=480:duration=${dur}" \
+        -f lavfi -i "sine=frequency=500:duration=${dur}" \
+        -i "$sub_en" -i "$sub_fr" \
+        -map 0:v -map 1:a -map 2:a -map 3:a -map 4 -map 5 \
+        -c:v libx264 -preset ultrafast -crf 30 -pix_fmt yuv420p \
+        -c:a aac -ac:a:1 6 -c:s srt \
+        -metadata:s:a:0 language=eng -metadata:s:a:1 language=fre -metadata:s:a:2 language=spa \
+        -metadata:s:s:0 language=eng -metadata:s:s:1 language=fre \
+        "$out" 2>/dev/null
+    rm -f "$sub_en" "$sub_fr"
+}
+
+# Generate an MKV carrying an attached_pic cover (the case that used to crash
+# SVT-AV1: a still-image second video stream).
+generate_cover_video() {
+    local out="$1" dur="${2:-2}"
+    local base="${out}.base.mkv" cover="${out}.cover.png"
+    generate_video "$base" "$dur"
+    ffmpeg -y -f lavfi -i "color=c=red:s=64x64:d=1" -frames:v 1 "$cover" 2>/dev/null
+    ffmpeg -y -i "$base" -i "$cover" -map 0 -map 1 -c copy \
+        -disposition:v:1 attached_pic "$out" 2>/dev/null
+    rm -f "$base" "$cover"
+}
+
+# Count streams of a given selector (e.g. a, s, v) in a file.
+count_streams() {
+    ffprobe -v error -select_streams "$1" -show_entries stream=index \
+        -of csv=p=0 "$2" 2>/dev/null | grep -c .
+}
+
 # Assert a file exists and is non-empty.
 assert_file_exists() {
     [[ -f "$1" ]] && [[ -s "$1" ]]
@@ -519,6 +559,113 @@ test_opus_audio() {
     fi
 }
 test_opus_audio
+
+# --- Cover art & track filtering ---
+
+section "Cover art & track filtering"
+
+test_cover_art_conversion() {
+    local dir="$TEST_DIR/cover"
+    mkdir -p "$dir"
+    generate_cover_video "$dir/withcover.mkv"
+
+    "$CONVERT" --no-progress --fast --copy-audio "$dir/withcover.mkv" >/dev/null 2>&1 && rc=0 || rc=$?
+
+    if [[ $rc -eq 0 ]] && assert_file_exists "$dir/withcover.mkv" "output"; then
+        local vcodec vcount
+        vcodec=$(get_codec "$dir/withcover.mkv")
+        vcount=$(count_streams v "$dir/withcover.mkv")
+        if [[ "$vcodec" == "av1" && "$vcount" -eq 2 ]]; then
+            pass "cover art preserved, main video encoded to AV1"
+        else
+            fail "cover art" "expected av1 + 2 video streams, got '$vcodec' / $vcount"
+        fi
+    else
+        fail "cover art" "conversion failed (exit $rc)"
+    fi
+}
+test_cover_art_conversion
+
+test_language_filter() {
+    local dir="$TEST_DIR/langs"
+    mkdir -p "$dir"
+    generate_multitrack_video "$dir/multi.mkv"
+
+    "$CONVERT" --no-progress --fast --copy-audio --langs fr,en "$dir/multi.mkv" >/dev/null 2>&1 && rc=0 || rc=$?
+
+    local acount scount
+    acount=$(count_streams a "$dir/multi.mkv")
+    scount=$(count_streams s "$dir/multi.mkv")
+    if [[ $rc -eq 0 ]] && [[ "$acount" -eq 2 ]] && [[ "$scount" -eq 2 ]]; then
+        pass "--langs keeps only matching audio/sub tracks (spa dropped)"
+    else
+        fail "language filter" "expected 2 audio / 2 subs, got $acount / $scount (exit $rc)"
+    fi
+}
+test_language_filter
+
+test_surround_preserved() {
+    local dir="$TEST_DIR/surround"
+    mkdir -p "$dir"
+    generate_multitrack_video "$dir/multi.mkv"
+
+    "$CONVERT" --no-progress --fast --opus "$dir/multi.mkv" >/dev/null 2>&1 && rc=0 || rc=$?
+
+    # The 5.1 (fre) track is output audio stream a:1 — it must stay 6 channels.
+    local ch
+    ch=$(ffprobe -v error -select_streams a:1 -show_entries stream=channels \
+        -of csv=p=0 "$dir/multi.mkv" 2>/dev/null | head -1 | tr -d '[:space:]')
+    if [[ $rc -eq 0 ]] && [[ "$ch" == "6" ]]; then
+        pass "5.1 audio keeps 6 channels through Opus (no downmix)"
+    else
+        fail "surround preserved" "expected 6 channels on a:1, got '$ch' (exit $rc)"
+    fi
+}
+test_surround_preserved
+
+test_copy_streams_remux() {
+    local dir="$TEST_DIR/remux"
+    mkdir -p "$dir"
+    generate_multitrack_video "$dir/multi.mkv"
+
+    "$CONVERT" --no-progress --copy-streams --langs fr,en "$dir/multi.mkv" >/dev/null 2>&1 && rc=0 || rc=$?
+
+    local vcodec acount
+    vcodec=$(get_codec "$dir/multi.mkv")
+    acount=$(count_streams a "$dir/multi.mkv")
+    if [[ $rc -eq 0 ]] && [[ "$vcodec" == "h264" ]] && [[ "$acount" -eq 2 ]]; then
+        pass "--copy-streams strips tracks without re-encoding video"
+    else
+        fail "copy-streams remux" "expected h264 + 2 audio, got '$vcodec' / $acount (exit $rc)"
+    fi
+}
+test_copy_streams_remux
+
+test_metadata_preserved() {
+    local dir="$TEST_DIR/meta"
+    mkdir -p "$dir"
+    ffmpeg -y -f lavfi -i "testsrc=duration=2:size=320x240:rate=25" \
+        -f lavfi -i "sine=frequency=440:duration=2" \
+        -c:v libx264 -preset ultrafast -crf 30 -pix_fmt yuv420p -c:a aac \
+        -metadata title="My Title" -metadata description="A summary." \
+        -metadata:s:a:0 title="Eng Audio" "$dir/m.mkv" 2>/dev/null
+
+    "$CONVERT" --no-progress --fast --opus "$dir/m.mkv" >/dev/null 2>&1 && rc=0 || rc=$?
+
+    local gtags stitle
+    gtags=$(ffprobe -v error -show_entries format_tags -of default=nk=0 "$dir/m.mkv" 2>/dev/null)
+    stitle=$(ffprobe -v error -select_streams a:0 -show_entries stream_tags=title \
+        -of csv=p=0 "$dir/m.mkv" 2>/dev/null | tr -d '[:space:]')
+    if [[ $rc -eq 0 ]] \
+        && echo "$gtags" | grep -qi "My Title" \
+        && echo "$gtags" | grep -qi "A summary." \
+        && [[ "$stitle" == "EngAudio" ]]; then
+        pass "global + per-stream metadata preserved through conversion"
+    else
+        fail "metadata preserved" "missing title/description or stream title (exit $rc)"
+    fi
+}
+test_metadata_preserved
 
 # --- File filtering ---
 

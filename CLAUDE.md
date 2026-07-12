@@ -9,6 +9,8 @@ bash -n convert-to-av1.sh              # Syntax check
 shellcheck convert-to-av1.sh           # Lint (static analysis)
 bash convert-to-av1.sh --help           # Show usage
 bash convert-to-av1.sh --dry-run .      # Test run (no conversion)
+bash test.sh                            # Integration suite (39 tests, synthetic files)
+bash test.sh --docker                   # Same, through the Docker wrapper
 ```
 
 Both checks run automatically on pre-commit via lefthook (`lefthook.yml`).

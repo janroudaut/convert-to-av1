@@ -14,7 +14,7 @@ Batch video converter to AV1 using FFmpeg and SVT-AV1. Designed to reduce storag
 - **Language track filtering** — keep only selected audio/subtitle languages (e.g. `fr,en`) to strip unwanted tracks
 - **Remux / cleanup mode** — `--copy-streams` strips tracks without re-encoding (fast)
 - **Per-directory profiles** — a `.convert-profile` file applies folder-specific flags (e.g. `--movie` for grainy films, `--cartoon` for animation)
-- **Staging on fast disk** — `--staging DIR` does the read/encode/SSIM on local storage to avoid slow-mount latency (WSL `/mnt`, NAS)
+- **Staging on fast disk** — `--staging DIR` does all the work (source read, encode, SSIM) on local storage, then writes the result back — dodges slow-mount latency (WSL `/mnt`, NAS)
 - **Cover art safe** — attached_pic covers/thumbnails are preserved (copied), never fed to the encoder
 - **Resolution scaling** — downscale to 1080p, 720p, or any custom height
 - **Recursive mode** — process entire directory trees
@@ -133,7 +133,7 @@ All presets use 10-bit encoding, enable-overlays, and scene-change detection. Fi
 | Flag | Description |
 |------|-------------|
 | `-r, --recursive` | Recurse into subdirectories |
-| `--staging, --work-dir DIR` | Stage source + encode + SSIM on a fast local disk, then write the output to its destination |
+| `--staging, --work-dir DIR` | Do all the work (source + encode + SSIM) on a fast local disk, then write the output to its destination |
 | `--sort-by-size [asc\|desc]` | Sort files by size before processing (default: desc) |
 | `--min-size SIZE` | Skip files smaller than SIZE (e.g., `100M`, `1G`) |
 | `--exclude PATTERN` | Exclude files matching glob pattern (repeatable) |
@@ -142,7 +142,7 @@ All presets use 10-bit encoding, enable-overlays, and scene-change detection. Fi
 | `--early-abort-threshold PCT` | Progress % at which to evaluate (default: 8) |
 | `--after CMD` | Run CMD after the batch completes |
 
-**Slow storage (WSL `/mnt`, network shares, NAS):** these mounts have high per-operation latency, which especially punishes the random seeks the SSIM quality check does across multi-GB files — often felt as long, silent stalls. `--staging DIR` copies each source to a fast local disk (e.g. `~/work` on ext4), runs the encode **and** the SSIM check there, then writes the finished file back to its destination atomically. The source read becomes one sequential copy (the least-bad case for these mounts) instead of scattered seeks.
+**Slow storage (WSL `/mnt`, network shares, NAS):** these mounts have high per-operation latency, which especially punishes the random seeks the SSIM quality check does across multi-GB files — often felt as long, silent stalls. `--staging DIR` copies each source to a fast local disk (e.g. `~/work` on ext4), does the whole encode (and the SSIM check, if any) there, then writes the finished file back to its destination atomically — turning scattered random seeks into one sequential copy.
 
 ```bash
 # Convert files on a slow Windows mount, but do all the work on native ext4

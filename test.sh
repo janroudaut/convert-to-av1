@@ -726,10 +726,8 @@ test_staging() {
     mkdir -p "$dir" "$stg"
     generate_video "$dir/v.mp4" 3
 
-    # Staging kicks in only with a quality check (its sole beneficiary);
-    # low min-ssim keeps the test about staging, not the quality threshold.
-    "$CONVERT" --no-progress --fast --quality-check --min-ssim 0.5 \
-        --staging "$stg" "$dir/v.mp4" >/dev/null 2>&1 && rc=0 || rc=$?
+    # Staging applies to all work (even without a quality check).
+    "$CONVERT" --no-progress --fast --staging "$stg" "$dir/v.mp4" >/dev/null 2>&1 && rc=0 || rc=$?
 
     local codec leftover
     codec=$(get_codec "$dir/v.mkv")

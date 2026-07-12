@@ -1811,17 +1811,12 @@ convert_file() {
     [[ -n "$ext_desc" ]] && echo -e "  ${GRAY}+desc: $(basename "$ext_desc")${NC}"
 
     # -- Stage source to fast local disk (optional) ----------------------------
-    # Staging only pays off for the SSIM quality check (random seeks across the
-    # whole file). The encode itself reads sequentially and is fine on a slow
-    # mount, so we skip the (large) source copy when there is no SSIM to speed up.
+    # When --staging is set, do all the work (source read, encode, SSIM) on the
+    # fast disk, then write the result back to its destination.
     local ffmpeg_input="$input_file"
     if [[ -n "$staging_dir" ]]; then
-        if $quality_check; then
-            stage_source "$input_file"
-            ffmpeg_input="$STAGED_INPUT"
-        else
-            debug "Staging skipped (no --quality-check): encode reads source in place"
-        fi
+        stage_source "$input_file"
+        ffmpeg_input="$STAGED_INPUT"
     fi
 
     # -- Resolve output path (temp on staging disk when active) ----------------

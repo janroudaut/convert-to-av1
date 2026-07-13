@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # ==============================================================================
-# convert-to-av1 v3.2.0 — Batch video conversion to AV1 (SVT-AV1 via ffmpeg)
+# convert-to-av1 v3.2.1 — Batch video conversion to AV1 (SVT-AV1 via ffmpeg)
 # ==============================================================================
 
-VERSION="3.2.0"
+VERSION="3.2.1"
 
 # -- Colors (respects NO_COLOR: https://no-color.org/) -------------------------
 if [[ -n "${NO_COLOR:-}" ]] || [[ ! -t 1 ]]; then
@@ -426,6 +426,8 @@ is_skip_logged() {
 }
 
 # Record a file as not worth converting (quality/size failure).
+# Line format: <size>\t<relpath>\t<source mtime>\t<reason>. The mtime is the
+# source's (identifies the file version that failed), not the log-write time.
 append_skip_log() {
     $skip_log_enabled || return 0
     local file="$1" size="$2" reason="$3"
@@ -433,7 +435,10 @@ append_skip_log() {
     key=$(skip_key "$file")
     [[ "${SKIP_LOG_SIZES[$key]:-}" == "$size" ]] && return 0   # already recorded
     SKIP_LOG_SIZES["$key"]="$size"
-    printf '%s\t%s\t%s\t%s\n' "$size" "$key" "$(date -Iseconds)" "$reason" \
+    local mt src_mtime="?"
+    mt=$(stat -c %Y "$file" 2>/dev/null)
+    [[ -n "$mt" ]] && src_mtime=$(date -d "@$mt" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo "?")
+    printf '%s\t%s\t%s\t%s\n' "$size" "$key" "$src_mtime" "$reason" \
         >> "$skip_log_file" 2>/dev/null || warn "Could not write skip-log: $skip_log_file"
 }
 

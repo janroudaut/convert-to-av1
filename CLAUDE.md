@@ -58,7 +58,7 @@ ffmpeg (with libsvtav1), ffprobe, python3, bc, numfmt, stat, mktemp
   skips them on later runs (filtered in `collect_and_sort_files`). Default file
   `.convert-skip.list` at the input root; paths stored **relative to the log dir**
   (`skip_key`, portable) with the source size as a safety net (changed file =
-  retried). Line format: `size\trelpath\tdate\treason`
+  retried). Line format: `size\trelpath\tsource-mtime\treason`
 - Per-directory `.convert-profile`: encoding/quality/audio/track flags applied
   per file by walking up from its dir (`resolve_file_profile`). CLI config is
   snapshotted (`snapshot_base_config`/`BASE_CFG`) and restored per file so

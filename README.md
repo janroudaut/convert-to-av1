@@ -141,7 +141,7 @@ All presets use 10-bit encoding, enable-overlays, and scene-change detection. Fi
 | `--early-abort-threshold PCT` | Progress % at which to evaluate (default: 8) |
 | `--after CMD` | Run CMD after the batch completes |
 
-**Skip log (`--skip-log`):** when re-converting a directory, files that came out *not worth it* — SSIM below the target, or AV1 larger than the source — are recorded and **skipped on the next run**, so a repeat batch doesn't waste time re-encoding known losers. The log defaults to `.convert-skip.list` at the input root (override with `--skip-log=FILE`); paths are stored relative to it (portable if the tree moves) and a recorded source size means a **changed file is retried**. Each entry keeps the size, date, and reason.
+**Skip log (`--skip-log`):** when re-converting a directory, files that came out *not worth it* — SSIM below the target, or AV1 larger than the source — are recorded and **skipped on the next run**, so a repeat batch doesn't waste time re-encoding known losers. The log defaults to `.convert-skip.list` at the input root (override with `--skip-log=FILE`); paths are stored relative to it (portable if the tree moves) and a recorded source size means a **changed file is retried**. Each entry keeps the size, source mtime, and reason.
 
 ```bash
 # First pass logs the duds; later passes skip them instantly

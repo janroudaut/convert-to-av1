@@ -1,5 +1,7 @@
 # convert-to-av1
 
+[![CI](https://github.com/janroudaut/convert-to-av1/actions/workflows/ci.yml/badge.svg)](https://github.com/janroudaut/convert-to-av1/actions/workflows/ci.yml)
+
 Batch video converter to AV1 using FFmpeg and SVT-AV1. Designed to reduce storage for TV recordings, series, and movies with minimal effort.
 
 ## Features
@@ -15,6 +17,9 @@ Batch video converter to AV1 using FFmpeg and SVT-AV1. Designed to reduce storag
 - **Remux / cleanup mode** — `--copy-streams` strips tracks without re-encoding (fast)
 - **Per-directory profiles** — a `.convert-profile` file applies folder-specific flags (e.g. `--movie` for grainy films, `--cartoon` for animation)
 - **Cover art safe** — attached_pic covers/thumbnails are preserved (copied), never fed to the encoder
+- **HDR safe** — HDR10/HLG colour metadata is detected and carried through to the AV1 stream
+- **Output verification** — optional full-decode check (`--verify`) before an output replaces anything
+- **Disk-space guard** — a file is skipped up front when the target filesystem can't hold its temp output
 - **Resolution scaling** — downscale to 1080p, 720p, or any custom height
 - **Recursive mode** — process entire directory trees
 - **Sort by size** — process smallest (or largest) files first
@@ -24,6 +29,8 @@ Batch video converter to AV1 using FFmpeg and SVT-AV1. Designed to reduce storag
 - **Graceful failures** — one failed file doesn't stop the batch; summary table at the end
 - **Lock files** — prevents concurrent conversion of the same file
 - **Post-batch command** — run a custom command after the batch completes
+- **Batch progress & ETA** — running byte-based estimate of the time left, shown between files
+- **Log stats** — `--stats` turns an accumulated `--log` file into a report (totals, throughput, SSIM)
 - **NO_COLOR support** — respects the `NO_COLOR` convention (any non-empty value disables colored output)
 - **Dry run mode** — preview what would happen without converting
 - **Dependency check** — verify all required tools are installed with `--check`
@@ -32,7 +39,7 @@ Batch video converter to AV1 using FFmpeg and SVT-AV1. Designed to reduce storag
 
 - `ffmpeg` and `ffprobe` (with `libsvtav1` support)
 - `python3` (for file info display)
-- Standard GNU utils: `bc`, `numfmt`, `stat`, `mktemp`
+- Standard GNU utils: `awk`, `bc`, `numfmt`, `stat`, `mktemp` (plus `df` for the optional disk-space guard)
 - RAM: expect roughly **2–3 GB** while encoding 1080p (more for 4K) — SVT-AV1's
   look-ahead, not the number of audio/subtitle tracks, drives this. Memory is
   bounded and does not grow with clip length.
@@ -97,7 +104,9 @@ convert-to-av1 [options] FILES[...]
 | `--smart, --keep-best-version` | Combines `--rm-src` + `--rm-if-bigger` + `--quality-check`; keeps the best version |
 | `--rm-source, --rm-src` | Remove source if output is smaller |
 | `--rm-if-bigger` | Remove output if it's larger than source |
-| `-y, --overwrite` | Overwrite existing output file |
+| `-y, --overwrite` | Overwrite an existing output file (default: skip it, so re-running a batch resumes where it left off) |
+
+Two safety guards run before each conversion: an **existing output** is skipped unless `-y` is given (in-place `.mkv` → `.mkv` replacement is always allowed — the target *is* the source), and two sources mapping to the **same output name** (`foo.mp4` + `foo.avi`, or same-named files from different subdirs with `-o`) are detected — the first one wins, the rest are skipped with a warning.
 
 ### Quality
 
@@ -111,8 +120,13 @@ convert-to-av1 [options] FILES[...]
 | `--cartoon` | Optimised for animation (no grain, higher CRF) |
 | `--tv` | Optimised for TV/broadcasts (no grain, faster preset) |
 | `--movie` | Optimised for cinema (film-grain + denoise, lower CRF) |
+| `--crf N` | Set the CRF directly (0–63, lower = better quality) |
+| `--preset N` | Set the SVT-AV1 preset directly (0–13, lower = slower/better) |
+| `--verify` | Fully decode each output before accepting it (catches corrupt bitstreams; costs one extra decode). Outputs under `--min-size` are always verified — a decode that small is free, and it proves a suspiciously tiny file is real video, not garbage |
 
-Speed presets (`--fast`, default, `--hq`) and content presets (`--cartoon`, `--tv`, `--movie`) are combinable in any order: `--fast --cartoon`, `--hq --movie`, etc.
+**HDR is preserved:** HDR10 (`smpte2084`/PQ) and HLG sources are detected from the probe and their colour metadata (transfer, primaries, matrix) is carried through to the AV1 stream — an untagged HDR encode would play back washed-out. SDR sources with invalid or missing colour metadata still get the BT.709 fix SVT-AV1 requires.
+
+Speed presets (`--fast`, default, `--hq`) and content presets (`--cartoon`, `--tv`, `--movie`) are combinable in any order: `--fast --cartoon`, `--hq --movie`, etc. An explicit `--crf`/`--preset` always wins over whatever the presets would derive (e.g. `--movie --crf 30` encodes at CRF 30, not 28), and both are usable in `.convert-profile` files for per-folder fine-tuning.
 
 Default: preset 8, CRF 28, 10-bit, no film-grain.
 
@@ -133,10 +147,10 @@ All presets use 10-bit encoding, enable-overlays, and scene-change detection. Fi
 |------|-------------|
 | `-r, --recursive` | Recurse into subdirectories |
 | `--sort-by-size [asc\|desc]` | Sort files by size before processing (default: desc) |
-| `--min-size SIZE` | Skip files smaller than SIZE (e.g., `100M`, `1G`) |
+| `--min-size SIZE` | Minimum plausible video size (default: `128K`; `0` disables). One threshold, three guards: smaller inputs are skipped, smaller outputs are decode-verified, and an output under `min(SIZE, input/10)` is flagged corrupt |
 | `--exclude PATTERN` | Exclude files matching glob pattern (repeatable) |
 | `--skip-log[=FILE]` | Record files not worth converting and skip them on re-runs |
-| `--dry-run` | Show what would be done without converting |
+| `--dry-run` | Preview without converting — shows the same per-file stream table (incl. per-track decisions) as a real run |
 | `--no-early-abort` | Disable early abort when output is estimated larger |
 | `--early-abort-threshold PCT` | Progress % at which to evaluate (default: 8) |
 | `--after CMD` | Run CMD after the batch completes |
@@ -160,6 +174,13 @@ All presets use 10-bit encoding, enable-overlays, and scene-change detection. Fi
 | `--audio-threshold KB/S` | Bitrate threshold for `--auto-audio` (default: 200) |
 
 The audio codec is chosen **per stream**: no global channel remapping is applied, so multichannel tracks (5.1/7.1) keep their native channel count — Opus re-encoding never downmixes surround to stereo. Non-standard channel layouts (e.g. `5.1(side)`) are normalised so `libopus` accepts them.
+
+Two more per-track rules:
+
+- **Already-Opus tracks are never re-encoded** (a lossy → lossy generation would only lose quality), whatever the mode.
+- **Hidden bitrates are measured, not guessed.** MKV often exposes no per-stream audio bitrate to `ffprobe`; when that happens in auto mode, the script samples ~20s of real packets (demux-only, a single extra `ffprobe` per file covering all audio streams at once, cached) to estimate it — shown as `~256k` in the file header. Without this, a high-bitrate AAC/DTS track would look like 0 kb/s and be wrongly copied.
+
+Note: `--hq` also switches the default audio mode from auto to copy — a max-quality run keeps the original audio untouched unless you ask otherwise.
 
 ### Tracks (language filtering)
 
@@ -200,7 +221,7 @@ Drop a `.convert-profile` file into a directory (or any parent) and its flags ar
 
 - Resolved **per file**: the tool walks up from each file's directory and uses the first `.convert-profile` it finds.
 - One flag per line or space-separated; `#` starts a comment.
-- Supports the encoding/quality/audio/track flags (`--movie`, `--cartoon`, `--tv`, `--hq`, `--fast`, `--1080`, `--opus`, `--langs`, `--copy-streams`, …). Batch/output flags (`-o`, `-r`, `--smart`, …) are ignored in profiles.
+- Supports the encoding/quality/audio/track flags (`--movie`, `--cartoon`, `--tv`, `--hq`, `--fast`, `--crf`, `--preset`, `--1080`, `--opus`, `--langs`, `--copy-streams`, …). Batch/output flags (`-o`, `-r`, `--smart`, …) are ignored in profiles.
 - Profile flags override the CLI base for that file.
 
 ```bash
@@ -229,7 +250,8 @@ Adjacent `.txt` files are embedded as MKV `description` metadata but are **never
 
 | Flag | Description |
 |------|-------------|
-| `-l, --log FILE` | Log FFmpeg output to FILE |
+| `-l, --log FILE` | Append a synthetic, greppable per-file TSV log to FILE (time, status, sizes, saved %, wall time, note) |
+| `--stats FILE` | Summarise a `--log` file and exit: per-status counts, converted totals, encode time/throughput, SSIM min/avg |
 | `-v, --verbose` | Verbose output |
 | `--no-progress` | Disable progress bar |
 
@@ -247,10 +269,12 @@ Adjacent `.txt` files are embedded as MKV `description` metadata but are **never
 flowchart TD
     A[Collect and sort files] --> SL{In skip-log?<br/>same size}
     SL -- yes --> SKIP[Skip]
-    SL -- no --> B{Already AV1?}
+    SL -- no --> PROF[Apply .convert-profile]
+    PROF --> B{Already AV1?}
     B -- yes, not remux --> SKIP
-    B -- no --> PROF[Apply .convert-profile]
-    PROF --> PROBE[Probe streams, duration, codec<br/>MPEG-TS timestamp fix if needed]
+    B -- no --> GUARD{Output exists without -y?<br/>Name collision? Disk full?}
+    GUARD -- yes --> SKIP
+    GUARD -- no --> PROBE[Probe streams, duration, codec<br/>MPEG-TS timestamp fix if needed]
     PROBE --> MAP[Select tracks: main video to AV1,<br/>copy cover art, keep/filter audio and subs,<br/>merge adjacent .srt/.vtt]
     MAP --> ENC[Encode with SVT-AV1<br/>per-stream Opus audio]
     ENC --> EA{Early abort?<br/>estimated output larger}
@@ -278,25 +302,29 @@ flowchart TD
 5. **Select tracks** — keeps all streams by default, or filters audio/subtitles by language; only the first video stream is encoded to AV1 while cover-art/thumbnail streams are copied verbatim
 6. **Encode** — runs FFmpeg with SVT-AV1 (per-stream audio codec), piping progress to a real-time monitor
 7. **Early abort** — at the configured threshold (default 8%), estimates final output size; aborts if it would be larger than input (only when `--smart` or `--rm-if-bigger`)
-8. **Post-process** — handles smart mode logic, source removal, in-place file swap; detects corrupt outputs (< 1 KiB)
+8. **Post-process** — handles smart mode logic, source removal, in-place file swap; detects corrupt outputs (below `min(--min-size, input/10)`, plus a full decode — forced for sub-`--min-size` outputs, everywhere with `--verify`)
 9. **Summary** — prints a table of all results with sizes and savings
 
 ## Example output
 
-Per-file, while converting (here with `--langs fr,en`, so only French/English tracks are kept):
+Per-file, while converting (here with `--langs fr,en`, so only French/English tracks are kept).
+Each stream shows, colour-coded, what will happen to it: `↻ av1`/`↻ opus` re-encode, `✓ copy` kept as-is, `✗ skip` dropped.
+
+The main video stream is always listed first (then audio, subtitles, covers), whatever the container's stream order. A `~` before an audio bitrate means it was measured from real packets because the container didn't report one. During a batch, a progress line (files done, space saved, estimated time left) appears above each file.
 
 ```
-<- SOURCE (7.2G): 'S01E05 - Got Milk.mkv'
--> TARGET: 'S01E05 - Got Milk.mkv'
-  container: matroska,webm  duration: 00:56:28  bitrate: 22287 kb/s
-    #0 video: hevc [eng] 1920x1080 23.98fps
-  #3 audio: eac3 [eng] 6ch 48000Hz 768kb/s
-  #9 audio: eac3 [fre] 6ch 48000Hz 768kb/s
-  #43 subtitle: subrip [fre]
-  #50 subtitle: subrip [eng]
-  Audio: 6 track(s) -> Opus (native channels preserved), 0 copied
+batch: 4/12 done | saved 11.2G | ~02:41:05 left
+
+▸ [5/12] S01E05 - Got Milk.mkv   7.2G
+  video     ↻ av1    hevc       1920×1080    22287k    56m28s @ 23.98fps (matroska)
+  audio     ↻ opus   eac3       5.1          768k      [eng]
+  audio     ↻ opus   aac        5.1          ~641k     [fre]
+  audio     ✗ skip   eac3       5.1          768k      [ger]
+  subtitle  ✓ copy   subrip                            [fre]
+  subtitle  ✓ copy   subrip                            [eng]
+  → S01E05 - Got Milk.mkv
   [ 45%] [#############-----------------] 00:25:24/00:56:28 | fps: 42.1 1.9x | ETA: 00:16:20 | 2870kb/s saved=61%
-  Conversion done.
+  Conversion done in 00:29:42 (avg 45.6 fps, 1.9x).
   saved=4.4G (61%): 7.2G -> 2.8G
 ```
 
@@ -311,6 +339,33 @@ broken_file.avi                                    FAILED           200M        
 
 Total: 7.9G -> 2.8G | saved=5.1G (65%)
 OK: 1 | Skip: 1 | Abort: 0 | Fail: 1 | Total: 3 | elapsed: 00:48:12
+```
+
+With `--log FILE`, each file also gets one synthetic, tab-separated line (no colours, no
+progress bar) — easy to `grep`/`awk`/sort across runs:
+
+```
+2026-07-12T21:14:03+02:00  OK        in=7.2G  out=2.8G  saved=61%  took=00:29:42  saved 61% (4.4G) ssim=0.973214  S01E05 - Got Milk.mkv
+2026-07-12T21:14:05+02:00  SKIPPED   in=500M  out=-     saved=-    took=-         already AV1        already_av1.mkv
+2026-07-12T22:02:20+02:00  FAILED    in=200M  out=-     saved=-    took=-         ffmpeg exit 1      broken_file.avi
+```
+
+When `--quality-check` is active, the measured SSIM of each successful encode is recorded in the note (`ssim=…`) — handy for calibrating `--min-ssim` across a library after the fact.
+
+`--stats` turns that accumulated log into a report:
+
+```
+$ ./convert-to-av1.sh --stats convert.log
+convert-to-av1 v3.4.0 — stats for convert.log
+
+  OK         42
+  SKIPPED    10
+  FAILED     2
+  total      54
+
+  converted ......... 312.4G -> 141.9G (saved 170.5G, 54%)
+  encode time ....... 37h12m total, avg 53m/file, 2.4 MB/s
+  ssim .............. min 0.9231, avg 0.9612 (42 checked)
 ```
 
 ## Supported formats

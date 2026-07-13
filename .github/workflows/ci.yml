@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: bash -n convert-to-av1.sh && bash -n test.sh
+      - name: ShellCheck
+        run: shellcheck convert-to-av1.sh test.sh
+
+  test:
+    runs-on: ubuntu-24.04
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg bc
+      - name: Check ffmpeg has SVT-AV1
+        run: ffmpeg -hide_banner -encoders | grep libsvtav1
+      - name: Dependency check
+        run: bash convert-to-av1.sh --check
+      - name: Integration suite
+        run: bash test.sh

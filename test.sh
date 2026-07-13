@@ -10,7 +10,11 @@ set -uo pipefail
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONVERT="$SCRIPT_DIR/convert-to-av1.sh"
+CONVERT_BIN="$SCRIPT_DIR/convert-to-av1.sh"
+# Synthetic test files can be tiny (a 2s testsrc clip compresses below the 128K
+# default --min-size), so the suite runs with the filter disabled; tests that
+# exercise --min-size pass their own value, which overrides (last flag wins).
+CONVERT=""   # set in setup() — wrapper injecting --min-size 0
 
 TEST_DIR=""
 PASS=0
@@ -38,6 +42,9 @@ fi
 
 setup() {
     TEST_DIR="$(mktemp -d /tmp/convert-av1-test.XXXXXX)"
+    CONVERT="$TEST_DIR/convert-wrapper.sh"
+    printf '#!/usr/bin/env bash\nexec bash %q --min-size 0 "$@"\n' "$CONVERT_BIN" > "$CONVERT"
+    chmod +x "$CONVERT"
 }
 
 # shellcheck disable=SC2317
@@ -969,6 +976,280 @@ test_sort_by_size() {
     fi
 }
 test_sort_by_size
+
+# --- Argument validation ---
+
+section "Argument validation"
+
+test_arg_validation() {
+    local rc
+    "$CONVERT" --crf 99 . >/dev/null 2>&1; rc=$?
+    if [[ $rc -eq 1 ]]; then
+        pass "--crf out of range rejected at parse time"
+    else
+        fail "--crf out of range rejected at parse time" "exit code $rc (expected 1)"
+    fi
+
+    "$CONVERT" --max-res abc . >/dev/null 2>&1; rc=$?
+    if [[ $rc -eq 1 ]]; then
+        pass "--max-res non-numeric rejected at parse time"
+    else
+        fail "--max-res non-numeric rejected at parse time" "exit code $rc (expected 1)"
+    fi
+
+    "$CONVERT" --min-size 12X . >/dev/null 2>&1; rc=$?
+    if [[ $rc -eq 1 ]]; then
+        pass "--min-size invalid unit rejected"
+    else
+        fail "--min-size invalid unit rejected" "exit code $rc (expected 1)"
+    fi
+}
+test_arg_validation
+
+test_crf_preset_flags() {
+    local dir="$TEST_DIR/crfpreset"
+    mkdir -p "$dir"
+    generate_video "$dir/v.mp4" 2
+
+    local output
+    output=$("$CONVERT" --crf 30 --preset 6 --dry-run "$dir/v.mp4" 2>&1)
+    if echo "$output" | grep -q "preset=6 crf=30"; then
+        pass "--crf/--preset override the encoder settings"
+    else
+        fail "--crf/--preset override the encoder settings" "banner does not show preset=6 crf=30"
+    fi
+
+    # Explicit --crf must win over the content-type adjustment (--movie = crf-2)
+    output=$("$CONVERT" --crf 30 --movie --dry-run "$dir/v.mp4" 2>&1)
+    if echo "$output" | grep -q "crf=30"; then
+        pass "explicit --crf wins over content-type presets"
+    else
+        fail "explicit --crf wins over content-type presets" "banner does not keep crf=30"
+    fi
+}
+test_crf_preset_flags
+
+test_min_size_default() {
+    local dir="$TEST_DIR/minsize-default"
+    mkdir -p "$dir"
+    dd if=/dev/zero of="$dir/tiny.mp4" bs=1024 count=10 2>/dev/null
+
+    # The real script (not the suite wrapper) must filter <128K files by default
+    local output
+    output=$(bash "$CONVERT_BIN" --dry-run "$dir/tiny.mp4" 2>&1)
+    if echo "$output" | grep -qi "below min-size\|No video files"; then
+        pass "files under 128K are skipped by default"
+    else
+        fail "files under 128K are skipped by default" "tiny.mp4 was not filtered"
+    fi
+}
+test_min_size_default
+
+test_min_size_decimal() {
+    local dir="$TEST_DIR/minsize"
+    mkdir -p "$dir"
+    generate_video "$dir/v.mp4" 2
+
+    local output
+    output=$("$CONVERT" --min-size 1.5K --dry-run "$dir/v.mp4" 2>&1)
+    if echo "$output" | grep -q "min size .* 1.5K"; then
+        pass "--min-size accepts decimal sizes (1.5K)"
+    else
+        fail "--min-size accepts decimal sizes (1.5K)" "banner does not show 1.5K"
+    fi
+}
+test_min_size_decimal
+
+# --- Audio decisions ---
+
+section "Audio decisions"
+
+test_opus_never_reencoded() {
+    local dir="$TEST_DIR/opuscopy"
+    mkdir -p "$dir"
+    ffmpeg -y -f lavfi -i "testsrc=duration=2:size=320x240:rate=25" \
+        -f lavfi -i "sine=frequency=440:duration=2" \
+        -c:v libx264 -preset ultrafast -crf 30 -pix_fmt yuv420p \
+        -c:a libopus -b:a 96k "$dir/v.mkv" 2>/dev/null
+
+    # Even with --opus forced, an already-Opus track must be copied verbatim
+    local output
+    output=$("$CONVERT" --opus --dry-run "$dir/v.mkv" 2>&1)
+    if echo "$output" | grep -E "copy +opus" >/dev/null; then
+        pass "already-Opus track is copied, never re-encoded"
+    else
+        fail "already-Opus track is copied, never re-encoded" "disposition table does not show copy for the opus track"
+    fi
+}
+test_opus_never_reencoded
+
+test_hidden_bitrate_estimation() {
+    local dir="$TEST_DIR/hiddenbr"
+    mkdir -p "$dir"
+    # AAC in MKV exposes no bit_rate to ffprobe — auto mode must packet-sample
+    # it instead of assuming 0 kb/s and wrongly copying a high-bitrate track.
+    ffmpeg -y -f lavfi -i "testsrc=duration=4:size=320x240:rate=25" \
+        -f lavfi -i "anoisesrc=d=4:c=pink" \
+        -c:v libx264 -preset ultrafast -crf 30 -pix_fmt yuv420p \
+        -c:a aac -b:a 320k -ac 2 "$dir/v.mkv" 2>/dev/null
+
+    local output
+    output=$("$CONVERT" --dry-run "$dir/v.mkv" 2>&1)
+    if echo "$output" | grep -E "opus +aac .*~[0-9]+k" >/dev/null; then
+        pass "hidden-bitrate AAC is packet-sampled and re-encoded"
+    else
+        fail "hidden-bitrate AAC is packet-sampled and re-encoded" "no estimated (~) opus decision for the aac track"
+    fi
+}
+test_hidden_bitrate_estimation
+
+# --- Output safety ---
+
+section "Output safety"
+
+test_output_exists_skip() {
+    local dir="$TEST_DIR/exists"
+    local outdir="$dir/out"
+    mkdir -p "$dir"
+    generate_video "$dir/v.mp4" 2
+
+    "$CONVERT" -o "$outdir" --no-progress "$dir/v.mp4" >/dev/null 2>&1
+    if ! assert_file_exists "$outdir/v.mkv"; then
+        fail "existing output skipped without -y" "first conversion did not produce output"
+        return
+    fi
+
+    # Re-run without -y: must skip (note: output mtime cannot be used as the
+    # signal — the script deliberately clones the source timestamps onto it)
+    local output
+    output=$("$CONVERT" -o "$outdir" --no-progress "$dir/v.mp4" 2>&1)
+    if echo "$output" | grep -q "output exists"; then
+        pass "existing output skipped without -y"
+    else
+        fail "existing output skipped without -y" "re-run did not skip the existing output"
+    fi
+
+    # With -y the file must be re-encoded
+    output=$("$CONVERT" -o "$outdir" -y --no-progress "$dir/v.mp4" 2>&1)
+    if echo "$output" | grep -q "Conversion done" \
+       && ! echo "$output" | grep -q "output exists"; then
+        pass "-y overwrites the existing output"
+    else
+        fail "-y overwrites the existing output" "re-run with -y did not re-encode"
+    fi
+}
+test_output_exists_skip
+
+test_small_output_forced_verify() {
+    local dir="$TEST_DIR/forcedverify"
+    mkdir -p "$dir"
+    # Near-lossless x264 source (large input, passes the 128K input filter);
+    # its AV1 encode of a simple test pattern lands well under 128K.
+    ffmpeg -y -f lavfi -i "testsrc=duration=3:size=640x480:rate=25" \
+        -c:v libx264 -preset ultrafast -crf 1 -pix_fmt yuv420p \
+        "$dir/v.mp4" 2>/dev/null
+
+    # Real script, default min-size: the tiny output must be decode-checked
+    # even without --verify — and still accepted when valid
+    local output
+    output=$(bash "$CONVERT_BIN" -o "$dir/out" --no-progress "$dir/v.mp4" 2>&1)
+    if echo "$output" | grep -q "verifying (full decode)" \
+       && assert_file_exists "$dir/out/v.mkv"; then
+        pass "small outputs are force-verified without --verify"
+    else
+        fail "small outputs are force-verified without --verify" "no forced decode check for a sub-min-size output"
+    fi
+}
+test_small_output_forced_verify
+
+test_output_collision() {
+    local dir="$TEST_DIR/collision"
+    mkdir -p "$dir"
+    generate_video "$dir/same.mp4" 2
+    generate_video "$dir/same.avi" 2
+
+    local output
+    output=$("$CONVERT" --dry-run "$dir/same.mp4" "$dir/same.avi" 2>&1)
+    if echo "$output" | grep -q "output name collision"; then
+        pass "same-target sources are detected as a collision"
+    else
+        fail "same-target sources are detected as a collision" "no collision reported for same.mp4 + same.avi"
+    fi
+}
+test_output_collision
+
+test_verify_output() {
+    local dir="$TEST_DIR/verify"
+    mkdir -p "$dir"
+    generate_video "$dir/v.mp4" 2
+
+    local output
+    output=$("$CONVERT" -o "$dir/out" --verify --no-progress "$dir/v.mp4" 2>&1)
+    if echo "$output" | grep -q "Verifying output" \
+       && assert_file_exists "$dir/out/v.mkv"; then
+        pass "--verify decodes and accepts a good output"
+    else
+        fail "--verify decodes and accepts a good output" "verification did not run or output missing"
+    fi
+}
+test_verify_output
+
+test_stats_summary() {
+    local dir="$TEST_DIR/stats"
+    mkdir -p "$dir"
+    generate_video "$dir/v.mp4" 2
+
+    "$CONVERT" -o "$dir/out" --log "$dir/log.tsv" --no-progress "$dir/v.mp4" >/dev/null 2>&1
+    local output
+    output=$("$CONVERT" --stats "$dir/log.tsv" 2>&1)
+    if echo "$output" | grep -q "OK         1" \
+       && echo "$output" | grep -q "converted"; then
+        pass "--stats summarises a --log file"
+    else
+        fail "--stats summarises a --log file" "missing counts or totals in stats output"
+    fi
+}
+test_stats_summary
+
+# --- HDR preservation ---
+
+section "HDR preservation"
+
+test_hdr_metadata_preserved() {
+    local dir="$TEST_DIR/hdr"
+    mkdir -p "$dir"
+    # setparams stamps the frames; the encoder then writes the HDR10 tags
+    ffmpeg -y -f lavfi -i "testsrc=duration=2:size=320x240:rate=25" \
+        -vf "setparams=colorspace=bt2020nc:color_primaries=bt2020:color_trc=smpte2084" \
+        -c:v libx264 -preset ultrafast -pix_fmt yuv420p "$dir/hdr.mkv" 2>/dev/null
+
+    local output
+    output=$("$CONVERT" -o "$dir/out" --no-progress "$dir/hdr.mkv" 2>&1)
+    local trc
+    trc=$(ffprobe -v error -select_streams v:0 -show_entries stream=color_transfer \
+        -of csv=p=0 "$dir/out/hdr.mkv" 2>/dev/null)
+    if echo "$output" | grep -q "HDR source" && [[ "$trc" == "smpte2084" ]]; then
+        pass "HDR10 colour metadata survives the AV1 encode"
+    else
+        fail "HDR10 colour metadata survives the AV1 encode" "transfer is '${trc:-none}' (expected smpte2084)"
+    fi
+}
+test_hdr_metadata_preserved
+
+test_ssim_in_log() {
+    local dir="$TEST_DIR/ssimlog"
+    mkdir -p "$dir"
+    generate_video "$dir/v.mp4" 2
+
+    "$CONVERT" -o "$dir/out" --quality-check --min-ssim 0.1 \
+        --log "$dir/log.tsv" --no-progress "$dir/v.mp4" >/dev/null 2>&1
+    if grep -q "ssim=0\." "$dir/log.tsv" 2>/dev/null; then
+        pass "successful SSIM score recorded in --log"
+    else
+        fail "successful SSIM score recorded in --log" "no ssim= field in the OK log line"
+    fi
+}
+test_ssim_in_log
 
 # ===========================================================================
 # Summary

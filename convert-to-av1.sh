@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # ==============================================================================
-# convert-to-av1 v3.2.1 — Batch video conversion to AV1 (SVT-AV1 via ffmpeg)
+# convert-to-av1 v3.3.0 — Batch video conversion to AV1 (SVT-AV1 via ffmpeg)
 # ==============================================================================
 
-VERSION="3.2.1"
+VERSION="3.3.0"
 
 # -- Colors (respects NO_COLOR: https://no-color.org/) -------------------------
 if [[ -n "${NO_COLOR:-}" ]] || [[ ! -t 1 ]]; then
@@ -446,56 +446,121 @@ append_skip_log() {
 # Probe functions (ffprobe)
 # ==============================================================================
 
+# Per-file probe cache. One ffprobe + one python3 parse replaces the ~10 separate
+# ffprobe spawns previously done per file (codec, format, duration, frame count,
+# color space, track selection). Each spawn is a fork plus a file open — costly
+# on slow mounts (WSL /mnt). Keyed by path; re-runs only when the file changes.
+PROBE_FILE=""
+PROBE_FORMAT_NAME=""
+PROBE_DURATION="0"
+PROBE_V0_CODEC=""
+PROBE_V0_WIDTH="0"
+PROBE_V0_HEIGHT="0"
+PROBE_V0_NB_FRAMES="0"
+PROBE_V0_AVG_FRAME_RATE=""
+PROBE_V0_COLOR_SPACE=""
+PROBE_FORMAT_BITRATE=""
+PROBE_JSON=""          # raw ffprobe JSON, reused by print_file_info
+PROBE_STREAMS_TSV=""   # one row per stream: index<TAB>type<TAB>attached_pic<TAB>lang<TAB>channels<TAB>bitrate
+
+probe_load() {
+    local file="$1"
+    [[ "$file" == "$PROBE_FILE" ]] && return 0
+
+    # Reset to safe defaults (used if the probe fails / non-media file)
+    PROBE_FILE="$file"
+    PROBE_FORMAT_NAME=""; PROBE_DURATION="0"
+    PROBE_V0_CODEC=""; PROBE_V0_WIDTH="0"; PROBE_V0_HEIGHT="0"
+    PROBE_V0_NB_FRAMES="0"; PROBE_V0_AVG_FRAME_RATE=""; PROBE_V0_COLOR_SPACE=""
+    PROBE_FORMAT_BITRATE=""; PROBE_JSON=""; PROBE_STREAMS_TSV=""
+
+    local json
+    json=$(ffprobe -v error -show_format -show_streams -of json "$file" 2>/dev/null) || return 0
+    [[ -z "$json" ]] && return 0
+    PROBE_JSON="$json"
+
+    local parsed
+    parsed=$(printf '%s' "$json" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+fmt = d.get("format", {}) or {}
+streams = d.get("streams", []) or []
+def g(o, k, default=""):
+    v = o.get(k, default)
+    return "" if v is None else str(v)
+v0 = next((s for s in streams if s.get("codec_type") == "video"), {})
+print("\t".join([
+    g(fmt, "format_name"),
+    g(fmt, "duration", "0"),
+    g(v0, "codec_name"),
+    g(v0, "width", "0"),
+    g(v0, "height", "0"),
+    g(v0, "nb_frames", "0"),
+    g(v0, "avg_frame_rate"),
+    g(v0, "color_space"),
+    g(fmt, "bit_rate"),
+]))
+for s in streams:
+    disp = s.get("disposition", {}) or {}
+    tags = s.get("tags", {}) or {}
+    print("\t".join([
+        g(s, "index"), g(s, "codec_type"),
+        str(disp.get("attached_pic", 0)),
+        (tags.get("language", "") or ""),
+        g(s, "channels"), g(s, "bit_rate"),
+    ]))
+') || return 0
+    [[ -z "$parsed" ]] && return 0
+
+    # First line = scalars; remaining lines = per-stream TSV.
+    local first_line
+    IFS= read -r first_line <<< "$parsed"
+    IFS=$'\t' read -r PROBE_FORMAT_NAME PROBE_DURATION PROBE_V0_CODEC \
+        PROBE_V0_WIDTH PROBE_V0_HEIGHT PROBE_V0_NB_FRAMES \
+        PROBE_V0_AVG_FRAME_RATE PROBE_V0_COLOR_SPACE PROBE_FORMAT_BITRATE <<< "$first_line"
+    PROBE_STREAMS_TSV=$(printf '%s\n' "$parsed" | tail -n +2)
+    return 0
+}
+
 is_av1() {
-    local codec
-    codec=$(ffprobe -v error -select_streams v:0 \
-        -show_entries stream=codec_name -of csv=p=0 "$1" 2>/dev/null | head -1) || return 1
-    [[ "$codec" == "av1" ]]
+    probe_load "$1"
+    [[ "$PROBE_V0_CODEC" == "av1" ]]
 }
 
 is_mpeg_ts() {
-    local fmt
-    fmt=$(ffprobe -v error -show_entries format=format_name \
-        -of csv=p=0 "$1" 2>/dev/null) || return 1
-    [[ "$fmt" == *mpegts* ]]
+    probe_load "$1"
+    [[ "$PROBE_FORMAT_NAME" == *mpegts* ]]
 }
 
 get_video_height() {
-    local h
-    h=$(ffprobe -v error -select_streams v:0 \
-        -show_entries stream=height -of csv=p=0 "$1" 2>/dev/null | head -1) || h="0"
-    # Strip commas, carriage returns, newlines, whitespace — keep only digits
-    h=$(echo "$h" | tr -cd '0-9')
+    probe_load "$1"
+    local h="${PROBE_V0_HEIGHT//[!0-9]/}"
     echo "${h:-0}"
 }
 
 get_duration_secs() {
-    local dur
-    dur=$(ffprobe -v error -show_entries format=duration \
-        -of csv=p=0 "$1" 2>/dev/null | head -1) || { echo "0"; return; }
-    dur="${dur%%,*}"
-    dur=$(echo "$dur" | tr -cd '0-9.')
+    probe_load "$1"
+    local dur="${PROBE_DURATION%%,*}"
+    dur="${dur//[!0-9.]/}"
     printf "%.0f" "${dur:-0}" 2>/dev/null || echo "0"
 }
 
 # Estimate the primary video stream's total frame count (duration * fps).
 # Used to drive the progress bar in stream-copy mode (out_time reports N/A).
 get_total_frames() {
-    local file="$1" duration="${2:-0}"
+    probe_load "$1"
+    local duration="${2:-0}"
     # Prefer the container's frame count tag when present (exact, no math)
-    local nb
-    nb=$(ffprobe -v error -select_streams v:0 \
-        -show_entries stream=nb_frames -of csv=p=0 "$file" 2>/dev/null | head -1)
-    nb="${nb//[!0-9]/}"
+    local nb="${PROBE_V0_NB_FRAMES//[!0-9]/}"
     if [[ -n "$nb" && "$nb" -gt 0 ]]; then
         echo "$nb"
         return
     fi
     # Fall back to duration * average frame rate
-    local rfr
-    rfr=$(ffprobe -v error -select_streams v:0 \
-        -show_entries stream=avg_frame_rate -of csv=p=0 "$file" 2>/dev/null | head -1)
-    rfr="${rfr%%,*}"
+    local rfr="${PROBE_V0_AVG_FRAME_RATE%%,*}"
     if [[ "$rfr" == */* && "$duration" -gt 0 ]]; then
         local num den
         num="${rfr%/*}"; den="${rfr#*/}"
@@ -505,37 +570,6 @@ get_total_frames() {
         fi
     fi
     echo "0"
-}
-
-# Get audio bitrate in kb/s for the first audio stream
-get_audio_bitrate_kbps() {
-    local br
-    br=$(ffprobe -v error -select_streams a:0 \
-        -show_entries stream=bit_rate -of csv=p=0 "$1" 2>/dev/null | head -1)
-    # Strip trailing commas, carriage returns, whitespace
-    br="${br//$'\r'/}"
-    br="${br%%,*}"
-    br="${br// /}"
-    if [[ -n "$br" && "$br" != "N/A" && "$br" =~ ^[0-9]+$ ]]; then
-        echo $(( br / 1000 ))
-    else
-        echo "0"
-    fi
-}
-
-# Get audio channel count
-get_audio_channels() {
-    local ch
-    ch=$(ffprobe -v error -select_streams a:0 \
-        -show_entries stream=channels -of csv=p=0 "$1" 2>/dev/null | head -1)
-    ch="${ch//$'\r'/}"
-    ch="${ch%%,*}"
-    ch="${ch// /}"
-    if [[ -n "$ch" && "$ch" =~ ^[0-9]+$ ]]; then
-        echo "$ch"
-    else
-        echo "2"
-    fi
 }
 
 # Determine opus bitrate based on channel layout
@@ -567,34 +601,26 @@ get_file_size() {
     stat -c %s "$1" 2>/dev/null || echo "0"
 }
 
-# Print detailed info about a media file
+# Print detailed info about a media file (reuses the per-file probe cache).
 print_file_info() {
     local file="$1"
-    local probe
-    probe=$(ffprobe -v error \
-        -show_entries format=duration,bit_rate,format_name \
-        -show_entries stream=index,codec_type,codec_name,width,height,r_frame_rate,bit_rate,channels,sample_rate \
-        -show_entries stream_tags=language,title \
-        -of json "$file" 2>/dev/null) || return
+    probe_load "$file"
+    local probe="$PROBE_JSON"
+    [[ -z "$probe" ]] && return
 
-    # Format info
-    local fmt dur_s bitrate_s
-    fmt=$(echo "$probe" | grep -oP '"format_name"\s*:\s*"\K[^"]+' | head -1)
-    dur_s=$(echo "$probe" | grep -oP '"duration"\s*:\s*"\K[^"]+' | head -1)
-    bitrate_s=$(echo "$probe" | grep -oP '"bit_rate"\s*:\s*"\K[^"]+' | tail -1)
-
+    # Format info (from cached scalars)
     local dur_fmt=""
-    if [[ -n "$dur_s" ]]; then
+    if [[ "$PROBE_DURATION" != "0" && -n "$PROBE_DURATION" ]]; then
         local dur_int
-        dur_int=$(printf "%.0f" "$dur_s" 2>/dev/null || echo "0")
+        dur_int=$(printf "%.0f" "$PROBE_DURATION" 2>/dev/null || echo "0")
         dur_fmt=$(format_duration "$dur_int")
     fi
     local bitrate_fmt=""
-    if [[ -n "$bitrate_s" && "$bitrate_s" != "N/A" && "$bitrate_s" =~ ^[0-9]+$ ]]; then
-        bitrate_fmt="$(( bitrate_s / 1000 )) kb/s"
+    if [[ -n "$PROBE_FORMAT_BITRATE" && "$PROBE_FORMAT_BITRATE" != "N/A" && "$PROBE_FORMAT_BITRATE" =~ ^[0-9]+$ ]]; then
+        bitrate_fmt="$(( PROBE_FORMAT_BITRATE / 1000 )) kb/s"
     fi
 
-    echo -e "  ${GRAY}container: ${fmt}  duration: ${dur_fmt}  bitrate: ${bitrate_fmt}${NC}"
+    echo -e "  ${GRAY}container: ${PROBE_FORMAT_NAME}  duration: ${dur_fmt}  bitrate: ${bitrate_fmt}${NC}"
 
     # Streams
     local stream_json
@@ -1325,10 +1351,14 @@ compute_track_selection() {
     local filtering=false
     [[ -n "$audio_langs" || -n "$sub_langs" ]] && filtering=true
 
+    # Single cached probe drives both track selection and per-audio channels/
+    # bitrate (TSV columns: index, type, attached_pic, lang, channels, bit_rate).
+    probe_load "$input"
+
     local -a kept_audio=() kept_sub=() all_audio=()
     local vpos=0
-    local idx ctype lang rest
-    while IFS=, read -r idx ctype _ lang rest; do
+    local idx ctype lang ach abr
+    while IFS=$'\t' read -r idx ctype _ lang ach abr; do
         [[ -z "$idx" ]] && continue
         case "$ctype" in
             video)
@@ -1345,6 +1375,11 @@ compute_track_selection() {
                     kept_audio+=("$idx")
                     TRACKSEL_A_KEPT=$((TRACKSEL_A_KEPT + 1))
                 fi
+                # Per-stream channels/bitrate (bit_rate may be absent -> 0).
+                [[ "$ach" =~ ^[0-9]+$ ]] || ach=2
+                abr="${abr//[!0-9]/}"
+                TRACKSEL_AUDIO_CH[$idx]="$ach"
+                TRACKSEL_AUDIO_BR[$idx]="${abr:-0}"
                 ;;
             subtitle)
                 TRACKSEL_S_TOTAL=$((TRACKSEL_S_TOTAL + 1))
@@ -1354,21 +1389,7 @@ compute_track_selection() {
                 fi
                 ;;
         esac
-    done < <(ffprobe -v error \
-        -show_entries stream=index,codec_type:stream_disposition=attached_pic:stream_tags=language \
-        -of csv=p=0 "$input" 2>/dev/null)
-
-    # Per-audio-stream channels and bitrate (reliable audio-only query;
-    # bit_rate may be absent — kept as 0 in that case).
-    local aidx ach abr
-    while IFS=, read -r aidx ach abr; do
-        [[ -z "$aidx" ]] && continue
-        [[ "$ach" =~ ^[0-9]+$ ]] || ach=2
-        abr="${abr//[!0-9]/}"
-        TRACKSEL_AUDIO_CH[$aidx]="$ach"
-        TRACKSEL_AUDIO_BR[$aidx]="${abr:-0}"
-    done < <(ffprobe -v error -select_streams a \
-        -show_entries stream=index,channels,bit_rate -of csv=p=0 "$input" 2>/dev/null)
+    done <<< "$PROBE_STREAMS_TSV"
 
     if ! $filtering; then
         TRACKSEL_MAP_ARGS=(-map 0)
@@ -1485,10 +1506,8 @@ build_ffmpeg_cmd() {
     fi
 
     # Fix invalid color metadata that SVT-AV1 rejects
-    local color_matrix
-    color_matrix=$(ffprobe -v error -select_streams v:0 \
-        -show_entries stream=color_space -of csv=p=0 "$input" 2>/dev/null | head -1)
-    color_matrix="${color_matrix%%,*}"
+    probe_load "$input"
+    local color_matrix="${PROBE_V0_COLOR_SPACE%%,*}"
     if [[ -z "$color_matrix" || "$color_matrix" == "unknown" || "$color_matrix" == "reserved" || "$color_matrix" == "gbr" ]]; then
         _cmd+=(-colorspace bt709 -color_primaries bt709 -color_trc bt709)
         debug "Fixing invalid/missing color metadata -> BT.709"
@@ -1768,13 +1787,10 @@ convert_file() {
     # -- Dry run ---------------------------------------------------------------
     if $dry_run; then
         local codec_info="" res_info="" ts_info="" scale_info="" sub_info=""
-        codec_info=$(ffprobe -v error -select_streams v:0 \
-            -show_entries stream=codec_name -of csv=p=0 "$input_file" 2>/dev/null | head -1 || echo "?")
-        codec_info="${codec_info//$'\r'/}"
+        probe_load "$input_file"
+        codec_info="${PROBE_V0_CODEC:-?}"
         local w h
-        w=$(ffprobe -v error -select_streams v:0 \
-            -show_entries stream=width -of csv=p=0 "$input_file" 2>/dev/null | head -1)
-        w="${w//$'\r'/}"; w="${w%%,*}"
+        w="${PROBE_V0_WIDTH%%,*}"
         h=$(get_video_height "$input_file")
         [[ -n "$w" && -n "$h" && "$w" != "0" ]] && res_info=" ${w}x${h}"
         is_mpeg_ts "$input_file" && ts_info=" [MPEG-TS fix]"

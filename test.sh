@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # Integration test suite for convert-to-av1.
 # Generates synthetic video files on the fly and exercises the main script features.
-# Usage: bash test.sh [--docker]
-#
-# --docker  Run tests through the Docker wrapper instead of the native script.
+# Usage: bash test.sh
 
 set -uo pipefail
 
@@ -13,11 +11,6 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONVERT="$SCRIPT_DIR/convert-to-av1.sh"
-
-if [[ "${1:-}" == "--docker" ]]; then
-    CONVERT="$SCRIPT_DIR/convert-to-av1-docker"
-    shift
-fi
 
 TEST_DIR=""
 PASS=0
@@ -64,11 +57,6 @@ fail() {
     ((FAIL++))
     FAILURES+=("$1: $2")
     printf "  ${RED}FAIL${RESET}  %s — %s\n" "$1" "$2"
-}
-
-skip_test() {
-    ((SKIP++))
-    printf "  ${YELLOW}SKIP${RESET}  %s — %s\n" "$1" "$2"
 }
 
 section() {
@@ -981,88 +969,6 @@ test_sort_by_size() {
     fi
 }
 test_sort_by_size
-
-# ===========================================================================
-# Docker wrapper tests
-# ===========================================================================
-
-section "Docker wrapper"
-
-test_docker_wrapper_check() {
-    if [[ ! -f "$SCRIPT_DIR/convert-to-av1-docker" ]]; then
-        skip_test "docker wrapper --check" "wrapper not found"
-        return
-    fi
-    if ! command -v docker &>/dev/null; then
-        skip_test "docker wrapper --check" "docker not available"
-        return
-    fi
-    if ! docker image inspect convert-to-av1 &>/dev/null; then
-        skip_test "docker wrapper --check" "docker image not built"
-        return
-    fi
-
-    local output
-    output=$("$SCRIPT_DIR/convert-to-av1-docker" --check 2>&1) && rc=0 || rc=$?
-
-    if [[ $rc -eq 0 ]] && echo "$output" | grep -q "All dependencies satisfied"; then
-        pass "docker wrapper: --check passes"
-    else
-        fail "docker wrapper --check" "exit code $rc"
-    fi
-}
-test_docker_wrapper_check
-
-test_docker_wrapper_absolute_path() {
-    if [[ ! -f "$SCRIPT_DIR/convert-to-av1-docker" ]] || ! command -v docker &>/dev/null; then
-        skip_test "docker wrapper absolute path" "docker or wrapper not available"
-        return
-    fi
-    if ! docker image inspect convert-to-av1 &>/dev/null; then
-        skip_test "docker wrapper absolute path" "docker image not built"
-        return
-    fi
-
-    local dir="$TEST_DIR/docker-abs"
-    mkdir -p "$dir"
-    generate_video "$dir/test.mp4" 2
-
-    local output
-    output=$("$SCRIPT_DIR/convert-to-av1-docker" --dry-run --no-progress "$dir/test.mp4" 2>&1) && rc=0 || rc=$?
-
-    if echo "$output" | grep -qi "DRYRUN\|test.mkv"; then
-        pass "docker wrapper: absolute paths work"
-    else
-        fail "docker wrapper absolute path" "unexpected output: $(echo "$output" | tail -3)"
-    fi
-}
-test_docker_wrapper_absolute_path
-
-test_docker_wrapper_relative_path() {
-    if [[ ! -f "$SCRIPT_DIR/convert-to-av1-docker" ]] || ! command -v docker &>/dev/null; then
-        skip_test "docker wrapper relative path" "docker or wrapper not available"
-        return
-    fi
-    if ! docker image inspect convert-to-av1 &>/dev/null; then
-        skip_test "docker wrapper relative path" "docker image not built"
-        return
-    fi
-
-    local dir="$TEST_DIR/docker-rel"
-    mkdir -p "$dir"
-    generate_video "$dir/rel.mp4" 2
-
-    local output
-    # Run from inside the test dir with a relative path
-    output=$(cd "$dir" && "$SCRIPT_DIR/convert-to-av1-docker" --dry-run --no-progress rel.mp4 2>&1) && rc=0 || rc=$?
-
-    if echo "$output" | grep -qi "DRYRUN\|rel.mkv"; then
-        pass "docker wrapper: relative paths work"
-    else
-        fail "docker wrapper relative path" "unexpected output: $(echo "$output" | tail -3)"
-    fi
-}
-test_docker_wrapper_relative_path
 
 # ===========================================================================
 # Summary

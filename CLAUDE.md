@@ -9,8 +9,7 @@ bash -n convert-to-av1.sh              # Syntax check
 shellcheck convert-to-av1.sh           # Lint (static analysis)
 bash convert-to-av1.sh --help           # Show usage
 bash convert-to-av1.sh --dry-run .      # Test run (no conversion)
-bash test.sh                            # Integration suite (38 tests, synthetic files)
-bash test.sh --docker                   # Same, through the Docker wrapper
+bash test.sh                            # Integration suite (35 tests, synthetic files)
 ```
 
 Both checks run automatically on pre-commit via lefthook (`lefthook.yml`).
@@ -23,6 +22,12 @@ ffmpeg (with libsvtav1), ffprobe, python3, bc, numfmt, stat, mktemp
 - Output is always MKV container
 
 ## Gotchas
+- Media metadata comes from a single cached probe per file: `probe_load` runs one
+  `ffprobe -show_format -show_streams -of json` + one python3 parse, keyed by path
+  (`PROBE_*` globals + `PROBE_STREAMS_TSV`). The probe helpers (`is_av1`,
+  `is_mpeg_ts`, `get_video_height`, `get_duration_secs`, `get_total_frames`),
+  `compute_track_selection` and `print_file_info` all read from it — never spawn a
+  fresh ffprobe for a field that's already in the cache (was ~9 spawns/file → 1)
 - Early abort only triggers when `--rm-if-bigger` or `--smart` is active
 - MPEG-TS inputs auto-get timestamp fix flags (`+genpts+igndts`)
 - Adjacent .srt/.vtt files are muxed in by default; deleted with `--rm-source`

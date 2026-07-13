@@ -7,7 +7,7 @@ set -euo pipefail
 
 VERSION="3.3.0"
 
-# -- Colors (respects NO_COLOR: https://no-color.org/) -------------------------
+# -- Colors (respects the NO_COLOR convention) ---------------------------------
 if [[ -n "${NO_COLOR:-}" ]] || [[ ! -t 1 ]]; then
     RED='' GREEN='' ORANGE='' GRAY='' BOLD='' NC=''
 else

@@ -24,7 +24,7 @@ Batch video converter to AV1 using FFmpeg and SVT-AV1. Designed to reduce storag
 - **Graceful failures** — one failed file doesn't stop the batch; summary table at the end
 - **Lock files** — prevents concurrent conversion of the same file
 - **Post-batch command** — run a custom command after the batch completes
-- **NO_COLOR support** — respects the [NO_COLOR](https://no-color.org/) standard
+- **NO_COLOR support** — respects the `NO_COLOR` convention (any non-empty value disables colored output)
 - **Dry run mode** — preview what would happen without converting
 - **Dependency check** — verify all required tools are installed with `--check`
 

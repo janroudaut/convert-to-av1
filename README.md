@@ -245,8 +245,10 @@ Adjacent `.txt` files are embedded as MKV `description` metadata but are **never
 
 ```mermaid
 flowchart TD
-    A[Collect and sort files] --> B{Already AV1?}
-    B -- yes, not remux --> SKIP[Skip]
+    A[Collect and sort files] --> SL{In skip-log?<br/>same size}
+    SL -- yes --> SKIP[Skip]
+    SL -- no --> B{Already AV1?}
+    B -- yes, not remux --> SKIP
     B -- no --> PROF[Apply .convert-profile]
     PROF --> PROBE[Probe streams, duration, codec<br/>MPEG-TS timestamp fix if needed]
     PROBE --> MAP[Select tracks: main video to AV1,<br/>copy cover art, keep/filter audio and subs,<br/>merge adjacent .srt/.vtt]
@@ -263,10 +265,14 @@ flowchart TD
     DROP --> SUM
     DONE --> SUM
     BEST --> SUM
+    KEEPSRC -.record.-> LOG[(skip-log)]
+    DROP -.record.-> LOG
+    BEST -.record.-> LOG
+    LOG -.next run.-> SL
 ```
 
 1. **Probe** — reads container format, streams, duration, and codec info
-2. **Skip** — if the video is already AV1, skip it (unless `--copy-streams`, which can still clean it)
+2. **Skip** — skip files already in AV1 (unless `--copy-streams`, which can still clean them), and files recorded in the skip-log from a previous run (`--skip-log`)
 3. **MPEG-TS fix** — if the container is MPEG-TS, applies `-fflags +genpts+igndts -avoid_negative_ts make_zero`
 4. **Merge** — detects and includes adjacent subtitle/description files
 5. **Select tracks** — keeps all streams by default, or filters audio/subtitles by language; only the first video stream is encoded to AV1 while cover-art/thumbnail streams are copied verbatim

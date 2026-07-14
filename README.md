@@ -52,6 +52,20 @@ Verify your setup:
 
 ## Quick start
 
+**The two commands that matter in practice:**
+
+```bash
+# THE everyday command — convert a whole library, keep only what's worth it:
+# re-encode, verify quality (SSIM), drop the losers, remove sources that
+# were beaten, resume where it left off on re-runs
+./convert-to-av1.sh --smart -r --skip-log --log convert.log /path/to/library/
+
+# Then, anytime: what did all those runs actually achieve?
+./convert-to-av1.sh --stats convert.log
+```
+
+Everything else is variations:
+
 ```bash
 # Convert all videos in current directory (in-place, default settings)
 ./convert-to-av1.sh .

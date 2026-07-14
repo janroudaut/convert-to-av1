@@ -9,7 +9,7 @@ bash -n convert-to-av1.sh              # Syntax check
 shellcheck convert-to-av1.sh           # Lint (static analysis)
 bash convert-to-av1.sh --help           # Show usage
 bash convert-to-av1.sh --dry-run .      # Test run (no conversion)
-bash test.sh                            # Integration suite (54 tests, synthetic files)
+bash test.sh                            # Integration suite (55 tests, synthetic files)
                                         # (runs via a wrapper injecting --min-size 0:
                                         #  synthetic clips are below the 128K default)
 ```
@@ -146,3 +146,7 @@ ffmpeg (with libsvtav1), ffprobe, python3, awk, bc, numfmt, stat, mktemp
 ## Code Style
 - All code, comments, CLI output, and docs must be in English
 - Bash with `set -euo pipefail`
+- Comments: "senior" minimalism — only when necessary/tricky, stating a
+  constraint or invariant the code cannot show (1-2 dense lines). Never
+  narrate obvious code, paraphrase the condition below, or record change
+  history inline (that belongs here in CLAUDE.md)

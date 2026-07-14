@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Decimal handling (printf %.0f, awk float math, bc comparisons) must not
-# depend on the user's locale — under e.g. fr_FR a decimal point is a comma
-# and printf/strtod silently misparse "123.456". LC_NUMERIC only: LC_ALL=C
-# would also break UTF-8 output from the embedded python (table symbols).
+# Locale-proof decimals (printf %.0f, awk/bc floats). LC_NUMERIC only:
+# LC_ALL=C would break the UTF-8 symbols printed by the embedded python.
 export LC_NUMERIC=C
 
 # ==============================================================================
@@ -56,10 +54,7 @@ dry_run=false
 sort_by_size=""
 no_progress=false
 early_abort=true
-# Progress % at which the size estimate is trusted. Early savings are often
-# misleading (title cards, credits, dark intros compress atypically) and real
-# gains frequently only show past ~10% — 15% leaves a safety margin beyond that.
-early_abort_threshold=15
+early_abort_threshold=15  # % of progress; early content compresses atypically, estimates firm up past ~10%
 merge_subs=true
 recursive=false
 audio_langs=""  # comma-separated language codes to keep (empty = keep all)
@@ -68,11 +63,9 @@ copy_streams=false  # remux only (no re-encode), just strip/keep selected tracks
 use_profiles=true   # honor per-directory .convert-profile files
 audio_mode="auto"  # copy, opus, auto
 audio_bitrate_threshold=200  # kb/s — auto mode re-encodes above this
-# Unified "too small to be real video" threshold (bytes, --min-size, 0 disables).
-# Drives three guards: inputs below it are skipped, an output below
-# min(min_size, input/10) is treated as corrupt, and an output below it gets a
-# forced full-decode verification (near-free at that size).
-min_size=131072  # 128K
+# One threshold, three guards: inputs below it are skipped, an output below
+# min(min_size, input/10) is corrupt, an output below it gets a forced decode check.
+min_size=131072  # bytes (--min-size, 0 disables)
 exclude_patterns=()
 skip_log_enabled=false  # persist quality-check failures and skip them on re-runs
 skip_log_file=""        # path to the failure log (empty = default at -r root)
@@ -81,7 +74,7 @@ verify_output=false  # full-decode check of the output before it replaces anythi
 quality_check=false
 quality_min_ssim=0.92  # minimum acceptable SSIM (0-1 scale)
 quality_sample_secs=10 # seconds per sample segment for quality check
-quality_samples=5      # number of evenly-spaced sample points for quality check
+quality_samples=5      # evenly-spaced sample points for the quality check
 
 # -- Global state (for cleanup) ------------------------------------------------
 CURRENT_TEMP_FILE=""
@@ -105,9 +98,7 @@ BATCH_DONE_BYTES=0        # input bytes fully handled so far (for the ETA)
 LAST_INPUT_SIZE=0         # input size of the last convert_file call (ETA accounting)
 LAST_SSIM=""              # SSIM score of the last successful quality check
 
-# Output-name collision guard: final path -> the source that claimed it.
-# foo.mp4 and foo.avi both target foo.mkv; with -o, same-named files from
-# different subdirs collide too — the second one is skipped with a warning.
+# Collision guard: final output path -> first source that claimed it
 declare -A CLAIMED_OUTPUTS=()
 
 # Quality-failure skip log: abspath -> recorded source size (bytes)
@@ -134,7 +125,6 @@ apply_content_type() {
         tv)
             svt_film_grain=0
             $svt_crf_explicit || svt_crf=$(( svt_crf + 1 ))
-            # Boost speed: TV content doesn't need slow presets
             if ! $svt_preset_explicit && [[ "$svt_preset" -lt 10 ]]; then
                 svt_preset=10
             fi
@@ -151,7 +141,6 @@ apply_content_type() {
     esac
 }
 
-# Assemble decomposed variables into the svtav1_options string
 build_svtav1_options() {
     local params="tune=${svt_tune}:film-grain=${svt_film_grain}:enable-overlays=${svt_enable_overlays}:scd=${svt_scd}"
     if [[ "$svt_film_grain_denoise" -eq 1 ]]; then
@@ -164,14 +153,11 @@ build_svtav1_options() {
 # Per-directory profiles (.convert-profile)
 # ==============================================================================
 #
-# A ".convert-profile" file placed in a directory (or any parent) applies its
-# encoding/quality/audio/track flags to files under it — e.g. a folder of
-# grainy films gets "--movie", an animation folder gets "--cartoon". Resolved
-# per file (each directory can differ); explicit flags in the profile override
-# the CLI base for that file.
+# Flags from the nearest .convert-profile (walking up from each file's dir)
+# override the CLI base for that file; each directory can differ.
 
-# The CLI-level encoding config that a profile may override. Captured once so
-# each file's profile starts from the same clean base (no leakage between dirs).
+# Config a profile may override — snapshotted so every file starts from the
+# same clean CLI base (no leakage between directories).
 PROFILE_VARS=(svt_preset svt_crf svt_preset_explicit svt_crf_explicit
     svt_film_grain svt_film_grain_denoise svt_tune
     svt_pix_fmt svt_enable_overlays svt_scd content_type speed_preset max_res
@@ -191,8 +177,6 @@ restore_base_config() {
     done
 }
 
-# Walk up from a file's directory to the filesystem root; echo the first
-# .convert-profile found (empty if none).
 find_profile_file() {
     local dir
     dir=$(cd "$(dirname "$1")" 2>/dev/null && pwd) || return 0
@@ -206,8 +190,8 @@ find_profile_file() {
     done
 }
 
-# Profile variant of the CLI validators: a bad value in a .convert-profile must
-# not kill a whole batch, so it warns and gets ignored instead of dying.
+# Profile validators warn+ignore instead of dying — a bad profile line must
+# never kill a whole batch.
 profile_uint() {
     [[ "${2:-}" =~ ^[0-9]+$ ]] && return 0
     warn "Profile option $1 expects a whole number, got: ${2:-<missing>} — ignored"
@@ -219,9 +203,8 @@ profile_str() {
     return 1
 }
 
-# Apply the subset of flags that make sense in a profile. Mirrors parse_args for
-# encoding/quality/audio/track options; ignores (with a warning) anything else.
-# Value-taking options consume 2 tokens when the value is present, 1 otherwise.
+# Profile-safe subset of parse_args. Value-taking options consume 2 tokens
+# when the value is present, 1 otherwise.
 apply_profile_tokens() {
     local n
     while [[ $# -gt 0 ]]; do
@@ -259,8 +242,7 @@ apply_profile_tokens() {
     done
 }
 
-# Restore the CLI base, then overlay the file's .convert-profile (if any), and
-# recompute the derived SVT options. Sets CURRENT_PROFILE_FILE/TOKENS.
+# Reset to the CLI base, overlay the file's profile, recompute derived options.
 resolve_file_profile() {
     local input_file="$1"
     restore_base_config
@@ -313,10 +295,7 @@ debug() {
     fi
 }
 
-# Erase the current terminal line (progress bar) and park the cursor at column 0.
-# Uses ANSI "clear to end of line" so it works regardless of the bar's width —
-# a fixed-width blank (e.g. %-80s) left the tail of longer bars on screen.
-# Pass "err" to clear on stderr (where the SSIM phase draws its feedback).
+# Width-agnostic erase of the live progress line ("err" = clear on stderr)
 clear_line() {
     $no_progress && return
     if [[ "${1:-}" == "err" ]]; then
@@ -326,8 +305,7 @@ clear_line() {
     fi
 }
 
-# Live one-line status for the initial file scan (drawn on stderr, interactive
-# only — redirected/non-TTY runs and --no-progress stay clean).
+# Live one-line status for the initial file scan (stderr, interactive only)
 scan_tick() {
     { $no_progress || [[ ! -t 2 ]]; } && return
     printf '\r\033[K  %s' "$1" >&2
@@ -351,22 +329,21 @@ format_duration() {
     printf "%02d:%02d:%02d" $((secs / 3600)) $(((secs % 3600) / 60)) $((secs % 60))
 }
 
-# -- CLI argument validators (fail fast at parse time, not mid-batch) ----------
-need_arg() {   # need_arg <flag> <value>
+# -- CLI argument validators (fail at parse time, not mid-batch) ---------------
+need_arg() {
     [[ -n "${2:-}" ]] || die "Option $1 requires a value"
 }
-need_uint() {  # need_uint <flag> <value>
+need_uint() {
     need_arg "$1" "${2:-}"
     [[ "$2" =~ ^[0-9]+$ ]] || die "Option $1 expects a whole number, got: $2"
 }
-need_ssim() {  # need_ssim <flag> <value>  (0-1, dot decimals)
+need_ssim() {
     need_arg "$1" "${2:-}"
     [[ "$2" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] \
         || die "Option $1 expects a value between 0 and 1 (e.g. 0.92), got: $2"
 }
 
-# Parse human-readable size (e.g., 100M, 1.5G, 500K) to bytes.
-# Decimals are supported; an unparsable value is a fatal usage error.
+# Human-readable size (100M, 1.5G, ...) -> bytes; dies on garbage
 parse_size() {
     local input="$1" num unit mult=1
     [[ "$input" =~ ^([0-9]+(\.[0-9]+)?)([A-Za-z]*)$ ]] \
@@ -384,7 +361,6 @@ parse_size() {
     awk -v n="$num" -v m="$mult" 'BEGIN { printf "%.0f", n * m }'
 }
 
-# Check if a filename matches any exclude pattern
 is_excluded() {
     local filename="$1"
     local base
@@ -396,8 +372,7 @@ is_excluded() {
     return 1
 }
 
-# Append one synthetic, greppable line per file to --log (tab-separated, no ANSI,
-# no progress bar): timestamp, status, sizes, saved %, note, path.
+# One synthetic TSV line per file in --log — never raw ffmpeg output
 write_log_line() {
     local file="$1" status="$2" in_sz="${3:-0}" out_sz="${4:-0}" note="${5:-}"
     local ts saved="-" out_disp="-" took="-"
@@ -415,11 +390,8 @@ write_log_line() {
         || warn "Could not write log: $log_file"
 }
 
-# Write a per-session banner into --log as "# ..." comment lines: date,
-# version, effective config, queue size. Written before the first encode so
-# the log exists (and is tail -f-able) from the very start of the batch.
-# Spaces and pipes only — never tabs, so print_log_stats keeps skipping these
-# lines via its NF filter.
+# Per-session "# ..." banner in --log, written before the first encode.
+# Must stay tab-free: print_log_stats skips comment lines via its NF filter.
 write_log_session_header() {
     local enc audio
     if $copy_streams; then
@@ -464,8 +436,7 @@ write_log_session_header() {
     } >> "$log_file" 2>/dev/null || warn "Could not write log: $log_file"
 }
 
-# Summarise a --log TSV (see write_log_line for the format) and exit.
-# Everything is derived from the log alone, so it works across many runs.
+# Summarise a --log TSV (write_log_line format) and exit
 print_log_stats() {
     local f="$1"
     [[ -f "$f" ]] || die "Log file not found: $f"
@@ -544,7 +515,6 @@ add_result() {
     SUMMARY_OUTPUT_SIZES+=("$output_sz")
     SUMMARY_NOTES+=("$note")
 
-    # Synthetic per-file log entry (dry runs are not recorded).
     if [[ -n "$log_file" && "$status" != "DRYRUN" ]]; then
         write_log_line "$file" "$status" "$input_sz" "$output_sz" "$note"
     fi
@@ -554,8 +524,7 @@ add_result() {
 # Language matching (track filtering)
 # ==============================================================================
 
-# Canonicalise a language code to its ISO 639-2/B 3-letter form when known.
-# Unknown codes are returned lowercased and unchanged (allows exact-tag matching).
+# Canonicalise to ISO 639-2/B when known; unknown codes pass through lowercased
 canon_lang() {
     local c="${1,,}"
     case "$c" in
@@ -586,8 +555,8 @@ canon_lang() {
     esac
 }
 
-# Return 0 if a stream's language tag matches any code in a comma-separated list.
-# Undefined/missing languages ("", "und") always match (kept as a safety net).
+# Undefined/missing languages ("", "und") always match — never drop a track
+# on a missing tag.
 lang_matches() {
     local stream_lang="${1,,}"
     local requested_csv="$2"
@@ -613,15 +582,13 @@ lang_matches() {
 # Quality-failure skip log
 # ==============================================================================
 #
-# Records files that were converted but not worth keeping (SSIM below target, or
-# output larger than source). On a later batch over the same tree they are
-# skipped instead of re-encoded. Paths are stored relative to the log's own
-# directory so the log stays valid if the tree is moved/mounted elsewhere; a
-# recorded source size acts as a safety net (a changed file is re-tried).
+# Files not worth keeping (low SSIM, output larger) are recorded and skipped on
+# later runs. Paths are stored relative to the log so the tree can move; the
+# recorded source size means a changed file is retried.
 
-SKIP_LOG_DIR=""  # absolute dir of the skip log (paths are relative to it)
+SKIP_LOG_DIR=""
 
-# Absolute path without resolving symlinks (realpath may be absent).
+# Absolute path without resolving symlinks (realpath may be absent)
 abspath() {
     local p="$1"
     if [[ -d "$p" ]]; then
@@ -633,8 +600,7 @@ abspath() {
     fi
 }
 
-# Key under which a file is stored: path relative to the log dir when the file
-# is under it, otherwise its absolute path.
+# Relative to the log dir when under it, absolute otherwise
 skip_key() {
     local af
     af=$(abspath "$1")
@@ -649,7 +615,6 @@ load_skip_log() {
     SKIP_LOG_DIR=$(abspath "$(dirname "$skip_log_file")")
     [[ -f "$skip_log_file" ]] || return 0
     local size path
-    # Line format: <size>\t<relpath>\t<date>\t<reason>  (reason/date ignored here)
     while IFS=$'\t' read -r size path _; do
         [[ -z "$path" || "$size" == \#* ]] && continue
         [[ "$size" =~ ^[0-9]+$ ]] || continue
@@ -657,7 +622,7 @@ load_skip_log() {
     done < "$skip_log_file"
 }
 
-# True if the file previously failed and is unchanged (same size = same file).
+# True if the file previously failed and is unchanged (same size = same file)
 is_skip_logged() {
     $skip_log_enabled || return 1
     local key rec
@@ -667,9 +632,8 @@ is_skip_logged() {
     [[ "$(get_file_size "$1")" == "$rec" ]]
 }
 
-# Record a file as not worth converting (quality/size failure).
-# Line format: <size>\t<relpath>\t<source mtime>\t<reason>. The mtime is the
-# source's (identifies the file version that failed), not the log-write time.
+# Line format: size \t relpath \t source-mtime \t reason — the mtime identifies
+# the file version that failed, not the log-write time.
 append_skip_log() {
     $skip_log_enabled || return 0
     local file="$1" size="$2" reason="$3"
@@ -688,10 +652,9 @@ append_skip_log() {
 # Probe functions (ffprobe)
 # ==============================================================================
 
-# Per-file probe cache. One ffprobe + one python3 parse replaces the ~10 separate
-# ffprobe spawns previously done per file (codec, format, duration, frame count,
-# color space, track selection). Each spawn is a fork plus a file open — costly
-# on slow mounts (/mnt/slow-nas). Keyed by path; re-runs only when the file changes.
+# Per-file probe cache: one ffprobe + one python3 parse serves every metadata
+# consumer. Never spawn a fresh ffprobe for a field already in here — each
+# spawn costs a fork + file open, painful on slow mounts.
 PROBE_FILE=""
 PROBE_FORMAT_NAME=""
 PROBE_DURATION="0"
@@ -710,7 +673,6 @@ probe_load() {
     local file="$1"
     [[ "$file" == "$PROBE_FILE" ]] && return 0
 
-    # Reset to safe defaults (used if the probe fails / non-media file)
     PROBE_FILE="$file"
     PROBE_FORMAT_NAME=""; PROBE_DURATION="0"
     PROBE_V0_CODEC=""; PROBE_V0_HEIGHT="0"
@@ -735,9 +697,8 @@ streams = d.get("streams", []) or []
 def g(o, k, default=""):
     v = o.get(k, default)
     return "" if v is None else str(v)
-# Empty fields are emitted as "-" — bash reads this TSV with IFS=tab, and tab
-# is IFS *whitespace*, so consecutive tabs would collapse and shift every
-# following column into the wrong variable. probe_load maps "-" back to "".
+# Empty fields become "-": tab is IFS whitespace on the bash side, so
+# consecutive tabs would collapse and shift the following columns.
 def f(v):
     return v if v != "" else "-"
 v0 = next((s for s in streams if s.get("codec_type") == "video"), {})
@@ -766,14 +727,14 @@ for s in streams:
 ') || return 0
     [[ -z "$parsed" ]] && return 0
 
-    # First line = scalars; remaining lines = per-stream TSV.
+    # First line = format/video scalars; the rest = per-stream TSV
     local first_line
     IFS= read -r first_line <<< "$parsed"
     IFS=$'\t' read -r PROBE_FORMAT_NAME PROBE_DURATION PROBE_V0_CODEC \
         PROBE_V0_HEIGHT PROBE_V0_NB_FRAMES \
         PROBE_V0_AVG_FRAME_RATE PROBE_V0_COLOR_SPACE \
         PROBE_V0_COLOR_TRC PROBE_V0_COLOR_PRIMARIES <<< "$first_line"
-    # Decode the "-" empty-field placeholder (see the python emitter above).
+    # Decode the "-" empty-field placeholder
     local v
     for v in PROBE_FORMAT_NAME PROBE_DURATION PROBE_V0_CODEC PROBE_V0_HEIGHT \
              PROBE_V0_NB_FRAMES PROBE_V0_AVG_FRAME_RATE PROBE_V0_COLOR_SPACE \
@@ -807,18 +768,16 @@ get_duration_secs() {
     printf "%.0f" "${dur:-0}" 2>/dev/null || echo "0"
 }
 
-# Estimate the primary video stream's total frame count (duration * fps).
-# Used to drive the progress bar in stream-copy mode (out_time reports N/A).
+# Total frame count of the primary video stream — drives the progress bar in
+# stream-copy mode, where ffmpeg reports out_time as N/A.
 get_total_frames() {
     probe_load "$1"
     local duration="${2:-0}"
-    # Prefer the container's frame count tag when present (exact, no math)
     local nb="${PROBE_V0_NB_FRAMES//[!0-9]/}"
     if [[ -n "$nb" && "$nb" -gt 0 ]]; then
         echo "$nb"
         return
     fi
-    # Fall back to duration * average frame rate
     local rfr="${PROBE_V0_AVG_FRAME_RATE%%,*}"
     if [[ "$rfr" == */* && "$duration" -gt 0 ]]; then
         local num den
@@ -831,8 +790,7 @@ get_total_frames() {
     echo "0"
 }
 
-# Determine opus bitrate based on channel layout
-# Conservative bitrates — audio quality is prioritized over video savings
+# Conservative per-layout Opus bitrates — audio quality over video savings
 get_opus_bitrate() {
     local channels="$1"
     case "$channels" in
@@ -844,10 +802,8 @@ get_opus_bitrate() {
     esac
 }
 
-# Canonical channel layout for a channel count. libopus rejects non-standard
-# layouts like "5.1(side)"; normalising to a standard layout (via aformat)
-# fixes "Could not open encoder" while preserving all surround channels.
-# Empty output = no normalisation needed (mono/stereo or unknown count).
+# libopus rejects non-standard layouts like "5.1(side)": normalising via
+# aformat keeps all surround channels. Empty = no normalisation needed.
 opus_channel_layout() {
     case "$1" in
         6) echo "5.1" ;;
@@ -860,28 +816,24 @@ get_file_size() {
     stat -c %s "$1" 2>/dev/null || echo "0"
 }
 
-# Free bytes on the filesystem holding DIR (empty output = could not tell,
-# in which case callers must not block the conversion).
+# Free bytes on the filesystem holding DIR; empty = unknown (must not block)
 get_free_space() {
     df -PB1 "$1" 2>/dev/null | awk 'NR == 2 { print $4 }'
 }
 
-# Estimate audio bitrates by demuxing (not decoding) ~20s of packets.
-# Needed because MKV often carries no per-stream bit_rate at all (no header
-# field, no BPS tag on ffmpeg-muxed files) — without this, --auto-audio would
-# see 0 kb/s and wrongly copy e.g. a 640k AAC track. ONE extra ffprobe per
-# file covers every audio stream at once (packets carry their stream_index);
-# results are cached, so multi-track files never re-spawn.
-ABR_ESTIMATE_FILE=""          # file the cache below belongs to
-declare -A ABR_ESTIMATE_CACHE=()   # stream index -> estimated bits/sec
+# Audio bitrates measured by demuxing ~20s of packets — MKV often carries no
+# per-stream bit_rate at all, and auto mode must not treat that as 0 kb/s.
+# One ffprobe covers every audio stream (packets carry their stream_index);
+# cached per file.
+ABR_ESTIMATE_FILE=""
+declare -A ABR_ESTIMATE_CACHE=()   # stream index -> bits/sec
 
 estimate_audio_bitrates() {
     local file="$1"
     [[ "$file" == "$ABR_ESTIMATE_FILE" ]] && return 0
     ABR_ESTIMATE_FILE="$file"
     ABR_ESTIMATE_CACHE=()
-    # Sample away from the head (intros/credits are not representative) unless
-    # the file is too short for that.
+    # Sample away from the head; intros/credits are not representative
     local start=60
     [[ "$(get_duration_secs "$file")" -lt 90 ]] && start=0
     local sidx est
@@ -906,16 +858,15 @@ estimate_audio_bitrates() {
         ') || true
 }
 
-# Cached per-stream estimate (bits/sec, 0 if it cannot be told).
+# Cached per-stream estimate (bits/sec, 0 = unknown)
 estimate_stream_bitrate() {
     estimate_audio_bitrates "$1"
     echo "${ABR_ESTIMATE_CACHE[$2]:-0}"
 }
 
-# Single source of truth for the per-track audio decision (opus or copy).
-# Used by both the header table (stream_dispositions) and build_ffmpeg_cmd so
-# what is shown is always what is done. Already-Opus tracks are never
-# re-encoded (generation loss for no gain), whatever the mode.
+# The per-track opus/copy decision — the ONLY place it is made, shared by the
+# header table and build_ffmpeg_cmd so display always matches the encode.
+# Already-Opus tracks are never re-encoded (generation loss for no gain).
 audio_stream_action() {
     local idx="$1"
     local codec="${TRACKSEL_AUDIO_CODEC[$idx]:-}"
@@ -927,25 +878,21 @@ audio_stream_action() {
         copy) echo "copy"; return ;;
         opus) echo "opus"; return ;;
     esac
-    # auto mode: re-encode above the bitrate threshold
     local kbps=$(( ${TRACKSEL_AUDIO_BR[$idx]:-0} / 1000 ))
     if [[ "$kbps" -gt 0 ]]; then
         if [[ "$kbps" -gt "$audio_bitrate_threshold" ]]; then echo "opus"; else echo "copy"; fi
         return
     fi
-    # Bitrate genuinely unknown (probe + BPS tag + packet estimate all failed):
-    # lossless/high-bitrate codecs always exceed any sane threshold; for the
-    # rest, copying is the safe default.
+    # Bitrate unknown even after packet sampling: lossless/high-bitrate codecs
+    # always exceed any sane threshold, everything else copies (safe default)
     case "$codec" in
         flac|alac|dts|truehd|mlp|pcm_*|wmalossless) echo "opus" ;;
         *) echo "copy" ;;
     esac
 }
 
-# Emit "index=state" pairs (comma-separated) describing what will happen to every
-# stream under the current selection: video -> av1 (or copy in remux mode), audio
-# -> opus/copy/skip, subtitle -> copy/skip, covers/data -> copy. Requires
-# compute_track_selection to have already run for the file.
+# Emit comma-separated "index=state" pairs for every stream (av1/opus/copy/
+# skip). Requires compute_track_selection to have run for the file.
 stream_dispositions() {
     local -A kept_a=() kept_s=()
     local x
@@ -970,8 +917,8 @@ stream_dispositions() {
                     state="copy"
                 else
                     state=$(audio_stream_action "$idx")
-                    # Packet-sampled bitrate: pass it along (":~NNNk") so the
-                    # table can fill an otherwise-empty rate cell.
+                    # ":~NNNk" suffix = packet-sampled bitrate, fills an
+                    # otherwise-empty rate cell in the table
                     if [[ -n "${TRACKSEL_AUDIO_BR_EST[$idx]:-}" && "${TRACKSEL_AUDIO_BR[$idx]:-0}" -gt 0 ]]; then
                         state+=":~$(( TRACKSEL_AUDIO_BR[$idx] / 1000 ))k"
                     fi
@@ -986,17 +933,14 @@ stream_dispositions() {
     echo "${pairs[*]}"
 }
 
-# Print a media file's streams (reuses the per-file probe cache) as fixed-width,
-# aligned columns scannable at a glance:
-#   type  disposition  codec  specs(res/layout)  rate(fps/bitrate)  lang/title
-# Disposition (from stream_dispositions, passed as $2 "idx=state,...") shows, per
-# stream and colour-coded, what will happen: av1/opus re-encode, copy, or skip.
-# Fields are truncated to their column width so long codec/resolution names on
-# real files never break the alignment.
+# Render the stream table: type / disposition / codec / specs / rate /
+# lang-title, fixed-width and truncated so exotic names never break alignment.
+# NOTE: the python block is wrapped in bash single quotes — apostrophes inside
+# it are fatal; use double quotes only.
 print_file_info() {
     local file="$1"
-    local decisions="${2:-}"
-    local sidecars="${3:-}"   # extra muxed-in files: "sub\tname" / "txt\tname" per line
+    local decisions="${2:-}"  # "idx=state,..." from stream_dispositions
+    local sidecars="${3:-}"   # "sub\tname" / "txt\tname" per line
     probe_load "$file"
     [[ -z "$PROBE_JSON" ]] && return
 
@@ -1018,15 +962,13 @@ for p in decs.split(","):
         k, v = p.split("=", 1)
         dec[k] = v
 
-# A decision value is "state" or "state:extra" — extra carries a packet-sampled
-# bitrate ("~256k") for streams whose container reports none.
+# "state" or "state:extra" — extra is a packet-sampled bitrate ("~256k")
 def dec_parts(idx):
     raw = dec.get(str(idx), "")
     state, _, extra = raw.partition(":")
     return state, extra
 
-# state -> (colour, symbol+word). av1/opus are re-encodes (orange), copy/mux/embed
-# keep data as-is (green), skip is dropped (red).
+# orange = re-encode, green = kept as-is, red = dropped
 STATE = {
     "av1":   (ORANGE, "↻ av1"),
     "opus":  (ORANGE, "↻ opus"),
@@ -1059,8 +1001,7 @@ def fps(rfr):
             d = int(d)
             if d > 0:
                 v = int(n) / d
-                # Only collapse to an integer for a truly whole rate (24/25/30/60);
-                # 24000/1001 = 23.976 must stay 23.98fps, not be rounded to 24.
+                # 24000/1001 must stay 23.98fps — only true integers collapse
                 return f"{v:.0f}fps" if abs(v - round(v)) < 0.001 else f"{v:.2f}fps"
         except Exception:
             pass
@@ -1092,8 +1033,7 @@ def row(label, sidx, codec, specs, rate, tail):
 
 prim = next((i for i, s in enumerate(streams) if s.get("codec_type") == "video"), None)
 
-# Display order: main video first, then audio, subtitles, covers, the rest —
-# regardless of the container stream order (some files put audio first).
+# Main video first, then audio/subs/covers — whatever the container order
 def prio(i, s):
     ct = s.get("codec_type", "")
     if ct == "video":
@@ -1115,8 +1055,6 @@ for i, s in sorted(enumerate(streams), key=lambda t: (prio(t[0], t[1]), t[0])):
     if ct == "video" and i == prim:
         w, h = s.get("width", "?"), s.get("height", "?")
         specs = f"{w}×{h}" if w != "?" else ""
-        # File/overall bitrate goes in the same (rate) column as audio bitrates;
-        # duration, fps and container are grouped in the trailing column.
         file_br = kbits(fmt.get("bit_rate", ""))
         d = dur_fmt(fmt.get("duration", ""))
         f = fps(s.get("r_frame_rate", ""))
@@ -1134,8 +1072,7 @@ for i, s in sorted(enumerate(streams), key=lambda t: (prio(t[0], t[1]), t[0])):
             ch = int(s.get("channels") or 0)
         except Exception:
             ch = 0
-        # Rate: stream bit_rate, else the mkvmerge BPS tag, else the
-        # packet-sampled estimate carried in the decision ("~256k").
+        # bit_rate, else mkvmerge BPS tag, else the packet-sampled estimate
         rate = kbits(s.get("bit_rate", "") or tags.get("BPS", "") or tags.get("BPS-eng", ""))
         if not rate:
             rate = dec_parts(sidx)[1]
@@ -1145,8 +1082,7 @@ for i, s in sorted(enumerate(streams), key=lambda t: (prio(t[0], t[1]), t[0])):
     else:
         out.append(row(ct, sidx, cn, "", "", tag))
 
-# Sidecar files muxed in from disk (external .srt/.vtt subs, .txt description),
-# appended as table rows at the end. Name lives in the trailing column (untruncated).
+# Sidecar files (external subs, .txt description) as trailing table rows
 LABELS = {"sub": "+sub", "txt": "+txt"}
 STATES = {"sub": "mux", "txt": "embed"}
 for line in sidecars.split("\n"):
@@ -1166,7 +1102,7 @@ print("\n".join(out))
     [[ -n "$rendered" ]] && echo -e "$rendered"
 }
 
-# Find adjacent subtitle files (.srt, .vtt) for a given video file
+# Adjacent .srt/.vtt files: exact (video.srt) and language-tagged (video.en.srt)
 find_subtitle_files() {
     local input_file="$1"
     local input_dir input_noext
@@ -1175,14 +1111,11 @@ find_subtitle_files() {
 
     local subs=()
     for ext in srt vtt; do
-        # Exact match: video.srt
         if [[ -f "${input_noext}.${ext}" ]]; then
             subs+=("${input_noext}.${ext}")
         fi
-        # Language-tagged: video.en.srt, video.fr.vtt, etc.
         for sub_file in "${input_noext}".*."${ext}"; do
             if [[ -f "$sub_file" ]]; then
-                # Avoid duplicates
                 local already=false
                 for s in "${subs[@]+"${subs[@]}"}"; do
                     [[ "$s" == "$sub_file" ]] && already=true
@@ -1195,7 +1128,6 @@ find_subtitle_files() {
     printf '%s\n' "${subs[@]+"${subs[@]}"}"
 }
 
-# Find adjacent .txt description file for a given video file
 find_description_file() {
     local input_file="$1"
     local input_noext="${input_file%.*}"
@@ -1213,16 +1145,15 @@ acquire_lock() {
     local file="$1"
     local lock_file="${file}.lock"
 
-    # Atomic lock creation using noclobber (set -C)
+    # noclobber makes the creation atomic; a lock owned by a dead PID is stale
+    # and retried once
     if ! ( set -C; echo "pid=$$,start=$(date -Iseconds)" > "$lock_file" ) 2>/dev/null; then
-        # Lock exists — check if owning PID is still alive
         local existing_pid
         existing_pid=$(grep -oP 'pid=\K[0-9]+' "$lock_file" 2>/dev/null || echo "")
         if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
             warn "File locked by PID $existing_pid: $file"
             return 1
         fi
-        # Stale lock — remove and retry once
         warn "Stale lock removed: $lock_file"
         rm -f "$lock_file"
         if ! ( set -C; echo "pid=$$,start=$(date -Iseconds)" > "$lock_file" ) 2>/dev/null; then
@@ -1248,10 +1179,8 @@ release_lock() {
 # Cleanup (trap)
 # ==============================================================================
 
-# Recursively kill a process and all its descendants. Needed because the SSIM
-# quality-check ffmpeg runs inside a command substitution, so it is a deep
-# grandchild of $$ — pkill -P $$ (direct children only) would miss it, which is
-# why Ctrl-C during the quality-check phase used to leave ffmpeg running.
+# Recursive kill: the SSIM ffmpeg runs inside a command substitution (deep
+# grandchild of $$), so pkill -P $$ alone would leave it running on Ctrl-C.
 kill_descendants() {
     local parent="$1" child
     for child in $(pgrep -P "$parent" 2>/dev/null); do
@@ -1265,22 +1194,17 @@ kill_descendants() {
 cleanup() {
     local exit_code=$?
 
-    # Restore terminal settings (in case we were interrupted during conversion)
     { stty sane < /dev/tty; } 2>/dev/null || true
 
-    # Only treat signal-triggered exits (Ctrl-C = 130, TERM = 143, ...) as an
-    # interruption. Plain error exits (usage error, failed --check) exit 1 with
-    # nothing running, so they get a silent cleanup — no "Interrupted" banner.
+    # Only signal exits (>= 128: Ctrl-C, TERM) are an interruption; plain error
+    # exits have nothing running and clean up silently
     if [[ "$exit_code" -ge 128 ]]; then
         echo ""
         info "Interrupted — cleaning up..."
-        # Kill the whole descendant tree — the main ffmpeg, key reader, AND the
-        # SSIM ffmpeg which runs inside a command substitution (a deep grandchild
-        # that pkill -P $$ would miss).
         kill_descendants $$
         wait 2>/dev/null || true
     fi
-    # Fallback: kill ffmpeg by PID file if still running
+    # Fallback: ffmpeg may outlive the tree walk — kill it by PID file
     local ffmpeg_pid_to_kill="$CURRENT_FFMPEG_PID"
     if [[ -z "$ffmpeg_pid_to_kill" ]]; then
         local pf
@@ -1293,28 +1217,23 @@ cleanup() {
         kill -9 "$ffmpeg_pid_to_kill" 2>/dev/null || true
     fi
 
-    # Clean up this process's temp files (PID-namespaced)
     rm -f "${TMPDIR:-/tmp}/convert-${$}-"* 2>/dev/null || true
 
-    # Remove temp file
     if [[ -n "$CURRENT_TEMP_FILE" && -f "$CURRENT_TEMP_FILE" ]]; then
         info "  Removing temp file: $CURRENT_TEMP_FILE"
         rm -f "$CURRENT_TEMP_FILE"
     fi
 
-    # Remove stderr log
     if [[ -n "$CURRENT_STDERR_LOG" && -f "$CURRENT_STDERR_LOG" ]]; then
         info "  Removing stderr log: $CURRENT_STDERR_LOG"
         rm -f "$CURRENT_STDERR_LOG"
     fi
 
-    # Release lock
     if [[ -n "$CURRENT_LOCK_FILE" && -f "$CURRENT_LOCK_FILE" ]]; then
         info "  Removing lock: $CURRENT_LOCK_FILE"
         rm -f "$CURRENT_LOCK_FILE"
     fi
 
-    # Print summary if at least one file was processed
     if [[ $FILES_PROCESSED -gt 0 ]]; then
         echo ""
         print_summary
@@ -1348,7 +1267,6 @@ check_dependencies() {
     debug "ffmpeg: $(ffmpeg -version | head -1)"
 }
 
-# Verbose dependency check for --check flag
 check_dependencies_verbose() {
     local all_ok=true
 
@@ -1374,13 +1292,11 @@ check_dependencies_verbose() {
         fi
     done
 
-    # Check for SVT-AV1 encoder support in ffmpeg
     echo ""
     local encoders
     encoders=$(ffmpeg -encoders 2>/dev/null || true)
     if echo "$encoders" | grep -q libsvtav1; then
-        # Grab the library version from a 1-frame null encode (the only place
-        # SVT-AV1 reports it) — useful when comparing encode speeds across hosts.
+        # SVT-AV1 only reports its lib version while encoding — 1-frame null encode
         local svt_ver
         svt_ver=$(ffmpeg -hide_banner -f lavfi -i "color=black:s=64x64:d=0.1" \
             -frames:v 1 -c:v libsvtav1 -f null - 2>&1 \
@@ -1672,7 +1588,7 @@ parse_args() {
                 ;;
             --langs|--lang)
                 need_arg "$1" "${2:-}"
-                # Shortcut: apply to both audio and subtitles (unless already set)
+                # Both audio and subs, unless a more specific flag already set one
                 [[ -z "$audio_langs" ]] && audio_langs="$2"
                 [[ -z "$sub_langs" ]] && sub_langs="$2"
                 shift 2
@@ -1735,12 +1651,10 @@ parse_args() {
         esac
     done
 
-    # Validation
     if [[ -n "$output_dir" && "$in_place" == true ]]; then
         die "--in-place and --output-dir are mutually exclusive"
     fi
 
-    # Default mode: in-place when no -o
     if [[ -z "$output_dir" ]]; then
         in_place=true
     fi
@@ -1750,13 +1664,11 @@ parse_args() {
         exit 1
     fi
 
-    # Create output directory if needed
     if [[ -n "$output_dir" ]]; then
         mkdir -p "$output_dir"
     fi
 
-    # Resolve the default skip-log location: .convert-skip.list at the root of
-    # the first input (the -r directory), unless an explicit path was given.
+    # Default skip-log location: .convert-skip.list at the first input's root
     if $skip_log_enabled && [[ -z "$skip_log_file" ]]; then
         local root="${input_args[0]}"
         if [[ -d "$root" ]]; then
@@ -1794,7 +1706,6 @@ collect_and_sort_files() {
         fi
     done
 
-    # Apply filters (min-size, exclude patterns)
     local filtered=()
     local total_c=${#collected[@]} i=0
     for f in "${collected[@]+"${collected[@]}"}"; do
@@ -1869,8 +1780,7 @@ resolve_output_path() {
         RESOLVED_FINAL="${output_dir}/${input_noext}.mkv"
     fi
 
-    # Always use a temp file for atomicity — write to temp, then mv on success.
-    # Temp is created in the same dir as final output (same filesystem for atomic mv).
+    # The temp lives next to the final output: same filesystem = atomic mv
     local temp_dir
     if $in_place; then
         temp_dir="$input_dir"
@@ -1900,10 +1810,9 @@ TRACKSEL_S_TOTAL=0
 TRACKSEL_S_KEPT=0
 TRACKSEL_AUDIO_FALLBACK=false
 
-# Decide which streams to map and which video streams are attached_pic covers.
-# Without a language filter, keeps everything (-map 0). With a filter, builds
-# explicit maps that preserve video/attachments/data and keep only the audio
-# and subtitle tracks whose language matches (undefined/und always kept).
+# Stream mapping: -map 0 without a language filter; explicit per-index maps
+# otherwise (video/attachments/data always kept). Also flags cover-art video
+# positions and gathers per-audio channels/bitrate/codec for the encode.
 compute_track_selection() {
     local input="$1"
 
@@ -1921,8 +1830,6 @@ compute_track_selection() {
     local filtering=false
     [[ -n "$audio_langs" || -n "$sub_langs" ]] && filtering=true
 
-    # Single cached probe drives both track selection and per-audio channels/
-    # bitrate (TSV columns: index, type, attached_pic, lang, channels, bit_rate).
     probe_load "$input"
 
     local -a kept_audio=() kept_sub=() all_audio=()
@@ -1935,9 +1842,8 @@ compute_track_selection() {
         [[ "$acodec" == "-" ]] && acodec=""
         case "$ctype" in
             video)
-                # Only the first video stream is the feature; any additional
-                # video stream is a cover/thumbnail (attached_pic often, but not
-                # always, flagged) — copy it rather than feed it to SVT-AV1.
+                # Any video stream past the first is a cover/thumbnail — the
+                # attached_pic flag is not always set, so position decides
                 [[ "$vpos" -ge 1 ]] && TRACKSEL_COVER_POS+=("$vpos")
                 vpos=$((vpos + 1))
                 ;;
@@ -1950,12 +1856,10 @@ compute_track_selection() {
                     TRACKSEL_A_KEPT=$((TRACKSEL_A_KEPT + 1))
                     this_kept=true
                 fi
-                # Per-stream channels/bitrate (bit_rate may be absent -> 0).
                 [[ "$ach" =~ ^[0-9]+$ ]] || ach=2
                 abr="${abr//[!0-9]/}"
-                # MKV frequently reports no audio bitrate at all; the auto mode
-                # decision needs one, so sample real packets (demux-only, cached)
-                # for kept tracks rather than silently treating them as 0 kb/s.
+                # No container bitrate (common in MKV): measure real packets
+                # instead of letting auto mode treat the track as 0 kb/s
                 if [[ -z "$abr" || "$abr" -eq 0 ]] && $this_kept \
                    && [[ "$audio_mode" == "auto" ]] && ! $copy_streams; then
                     abr=$(estimate_stream_bitrate "$input" "$idx")
@@ -1983,10 +1887,8 @@ compute_track_selection() {
         return
     fi
 
-    # Explicit mapping: keep all video (main + covers), attachments and data.
     TRACKSEL_MAP_ARGS=(-map 0:v)
 
-    # Audio
     if [[ -n "$audio_langs" ]]; then
         if [[ "$TRACKSEL_A_TOTAL" -gt 0 && "$TRACKSEL_A_KEPT" -eq 0 ]]; then
             # Safety net: never produce a file with no audio
@@ -2006,7 +1908,6 @@ compute_track_selection() {
         TRACKSEL_AUDIO_IDX=("${all_audio[@]+"${all_audio[@]}"}")
     fi
 
-    # Subtitles
     if [[ -n "$sub_langs" ]]; then
         local i
         for i in "${kept_sub[@]+"${kept_sub[@]}"}"; do
@@ -2016,7 +1917,7 @@ compute_track_selection() {
         TRACKSEL_MAP_ARGS+=(-map "0:s?")
     fi
 
-    # Keep attachments (subtitle fonts) and data streams
+    # Attachments (subtitle fonts) and data streams
     TRACKSEL_MAP_ARGS+=(-map "0:t?" -map "0:d?")
 }
 
@@ -2031,7 +1932,6 @@ build_ffmpeg_cmd() {
 
     _cmd=(ffmpeg -hide_banner)
 
-    # MPEG-TS: fix timestamps and tolerate corrupt packets
     if is_mpeg_ts "$input"; then
         _cmd+=(-fflags +genpts+igndts+discardcorrupt -avoid_negative_ts make_zero -err_detect ignore_err)
         debug "MPEG-TS detected, applying timestamp fix flags"
@@ -2039,7 +1939,6 @@ build_ffmpeg_cmd() {
 
     _cmd+=(-i "$input")
 
-    # Merge adjacent subtitle files
     if $merge_subs; then
         local sub_files
         sub_files=$(find_subtitle_files "$input")
@@ -2052,27 +1951,22 @@ build_ffmpeg_cmd() {
         done <<< "$sub_files"
     fi
 
-    # Always overwrite at ffmpeg level — the script handles output-exists logic
-    # at a higher level. The temp file from mktemp must be overwritable.
+    # -y at ffmpeg level: the mktemp target must be overwritable — the script
+    # handles output-exists logic itself, upstream
     _cmd+=(-y)
 
-    # Mapping: compute which streams to keep (all by default; filtered by
-    # language when --langs/--audio-langs/--sub-langs is set). Also identifies
-    # attached_pic cover streams so they are copied instead of re-encoded.
     compute_track_selection "$input"
     if $TRACKSEL_AUDIO_FALLBACK; then
         warn "No audio track matched languages [${audio_langs}] — keeping all audio: $(basename "$input")"
     fi
     _cmd+=("${TRACKSEL_MAP_ARGS[@]}" -map_metadata 0 -map_chapters 0)
 
-    # Map subtitle inputs
     if $merge_subs && [[ "${sub_count:-0}" -gt 0 ]]; then
         for ((si = 1; si <= sub_count; si++)); do
             _cmd+=(-map "$si")
         done
     fi
 
-    # Embed description from adjacent .txt file
     local desc_file
     desc_file=$(find_description_file "$input")
     if [[ -n "$desc_file" ]]; then
@@ -2082,7 +1976,6 @@ build_ffmpeg_cmd() {
         debug "Embedding description from: $desc_file"
     fi
 
-    # Remux-only mode: copy every stream verbatim (just strip unwanted tracks).
     if $copy_streams; then
         [[ -n "$max_res" ]] && warn "--copy-streams ignores --max-res (no video re-encode)"
         _cmd+=(-c copy)
@@ -2091,11 +1984,9 @@ build_ffmpeg_cmd() {
         return
     fi
 
-    # Colour metadata. HDR sources (HDR10 = smpte2084/PQ, HLG = arib-std-b67)
-    # must carry their transfer/primaries/matrix through to the AV1 stream —
-    # ffmpeg does not reliably tag them on the libsvtav1 output, and an
-    # untagged HDR encode plays back washed-out. SDR sources with invalid or
-    # missing metadata get the BT.709 fix SVT-AV1 requires.
+    # HDR sources must carry their colour metadata explicitly — ffmpeg does not
+    # reliably tag libsvtav1 output, and untagged HDR plays back washed-out.
+    # SDR with invalid/missing metadata gets the BT.709 fix SVT-AV1 requires.
     probe_load "$input"
     local color_matrix="${PROBE_V0_COLOR_SPACE%%,*}"
     local color_trc="${PROBE_V0_COLOR_TRC%%,*}"
@@ -2109,8 +2000,8 @@ build_ffmpeg_cmd() {
         debug "Fixing invalid/missing color metadata -> BT.709"
     fi
 
-    # Video codec — encode the main video stream to AV1; copy any attached_pic
-    # cover streams verbatim (SVT-AV1 cannot encode a single-frame cover).
+    # Main video to AV1; cover streams copied verbatim — SVT-AV1 cannot encode
+    # a single-frame attached_pic
     local -a svt_opts
     read -ra svt_opts <<< "$svtav1_options"
     _cmd+=(-c:v libsvtav1 "${svt_opts[@]}" -b:v 0)
@@ -2120,7 +2011,7 @@ build_ffmpeg_cmd() {
         debug "Copying cover art (output video stream $cpos) instead of encoding"
     done
 
-    # Scaling — only the main video stream (v:0), never the cover art
+    # Scale only the main stream (v:0), never the cover art
     if [[ -n "$max_res" ]]; then
         local height
         height=$(get_video_height "$input")
@@ -2130,10 +2021,7 @@ build_ffmpeg_cmd() {
         fi
     fi
 
-    # Audio codec — decided per stream so multichannel layouts (5.1/7.1) keep
-    # their native channel count. No -ac is set, so libopus never downmixes.
-    # The decision comes from audio_stream_action — the same one the header
-    # table shows — so display and encode can never disagree.
+    # Per-stream audio codec; no global -ac, so libopus never downmixes 5.1/7.1
     local aj=0
     local a_idx a_ch opus_br
     for a_idx in "${TRACKSEL_AUDIO_IDX[@]+"${TRACKSEL_AUDIO_IDX[@]}"}"; do
@@ -2141,8 +2029,6 @@ build_ffmpeg_cmd() {
         if [[ "$(audio_stream_action "$a_idx")" == "opus" ]]; then
             opus_br=$(get_opus_bitrate "$a_ch")
             _cmd+=(-c:a:"$aj" libopus -b:a:"$aj" "$opus_br")
-            # Normalise non-standard surround layouts (e.g. 5.1(side)) so libopus
-            # accepts them; channel count is preserved (no downmix).
             local a_layout
             a_layout=$(opus_channel_layout "$a_ch")
             [[ -n "$a_layout" ]] && _cmd+=(-filter:a:"$aj" "aformat=channel_layouts=$a_layout")
@@ -2155,10 +2041,7 @@ build_ffmpeg_cmd() {
     # Copy other non-audio/video streams
     _cmd+=(-c:s copy)
 
-    # Safety for problematic containers
     _cmd+=(-max_muxing_queue_size 4096)
-
-    # Progress output
     _cmd+=(-progress pipe:1 -nostats)
 
     _cmd+=("$output")
@@ -2200,9 +2083,6 @@ run_progress_monitor() {
                     clear_line
                     local done_secs=$(( $(date +%s) - start_time ))
                     if [[ "$done_secs" -gt 0 && "$duration" -gt 0 ]]; then
-                        # Wall time + average throughput: frames/s over the whole
-                        # run (cur_frame = last frame count ffmpeg reported) and
-                        # realtime speed factor, both in tenths.
                         local sp10=$(( duration * 10 / done_secs )) fps_avg=""
                         if [[ "$cur_frame" -gt 0 ]]; then
                             local fa10=$(( cur_frame * 10 / done_secs ))
@@ -2220,12 +2100,10 @@ run_progress_monitor() {
                 ;;
         esac
 
-        # Redraw on a timestamp update (encode) or a frame update (stream copy,
-        # where ffmpeg reports out_time as N/A but still counts muxed frames).
         [[ "$key" != "out_time_us" && "$key" != "frame" ]] && continue
 
-        # Current position in seconds: prefer real out_time; fall back to the
-        # muxed-frame fraction of the total duration for stream-copy remux.
+        # Position: real out_time when available; in -c copy mode ffmpeg
+        # reports N/A there, so fall back to the muxed-frame fraction
         local pos_sec=0
         if [[ "$out_time_sec" -gt 0 ]]; then
             pos_sec="$out_time_sec"
@@ -2239,8 +2117,7 @@ run_progress_monitor() {
         elapsed=$((now - start_time))
         [[ "$elapsed" -le 0 ]] && continue
 
-        # Pure bash fixed-point (tenths) — this redraws every second, and two
-        # bc spawns per tick add up on long encodes.
+        # Fixed-point tenths — this path redraws every second, keep it fork-free
         local speed_t=$(( pos_sec * 10 / elapsed ))
         speed_x="$((speed_t / 10)).$((speed_t % 10))"
         progress_pct=$(( (pos_sec * 100) / duration ))
@@ -2253,9 +2130,8 @@ run_progress_monitor() {
             eta_str=$(format_duration 0)
         fi
 
-        # -- Early abort check (at threshold, retries if temp file not yet written)
-        # Gated on the real-timestamp progress only (never the frame-count
-        # fallback), so the size estimate below is taken at a reliable point.
+        # Early abort is gated on real-timestamp progress only — the frame-count
+        # fallback is too coarse to base a size extrapolation on
         local time_pct=0
         [[ "$out_time_sec" -gt 0 ]] && time_pct=$(( out_time_sec * 100 / duration ))
         if $early_abort && ! $abort_checked && \
@@ -2266,20 +2142,16 @@ run_progress_monitor() {
 
             if [[ -f "$temp_file" ]]; then
                 current_output_size=$(get_file_size "$temp_file")
-                # Skip check if temp file is empty (ffmpeg hasn't flushed yet)
                 if [[ "$current_output_size" -le 0 ]]; then
-                    : # retry on next progress update
+                    : # ffmpeg has not flushed yet — retry on the next update
                 elif [[ "$out_time_sec" -gt 0 ]]; then
-                    # Early abort is an encode-only decision; base the size
-                    # estimate on real timestamps, never the frame-count fallback.
                     abort_checked=true
                     estimated_final_size=$(( current_output_size * duration / out_time_sec ))
                     if [[ "$estimated_final_size" -ge "$input_size" ]]; then
                         clear_line
                         warn "Early abort: estimated output $(human_size "$estimated_final_size") >= input $(human_size "$input_size") (at ${progress_pct}%)"
-                        # Signal abort to parent via file
+                        # Signal the parent (subshell cannot set its variables)
                         [[ -n "$abort_signal" ]] && touch "$abort_signal"
-                        # Kill ffmpeg directly
                         if [[ -n "$pid_file" && -f "$pid_file" ]]; then
                             local ffmpeg_pid
                             ffmpeg_pid=$(cat "$pid_file" 2>/dev/null || echo "")
@@ -2302,7 +2174,6 @@ run_progress_monitor() {
             current_time=$(format_duration "$pos_sec")
             total_time=$(format_duration "$duration")
 
-            # Output bitrate and estimated gain from temp file size
             local extra_str=""
             if [[ -f "$temp_file" && "$pos_sec" -gt 0 ]]; then
                 local cur_sz out_br_kbps
@@ -2334,10 +2205,9 @@ run_progress_monitor() {
 # Per-file header
 # ==============================================================================
 
-# Print the per-file block: "▸ [n/N] dir/name  SIZE  [profile]", the stream
-# table with per-track dispositions, sidecar rows, and the target path.
-# Shared by real conversions and --dry-run so both show the same picture.
-# Runs compute_track_selection (required by stream_dispositions) as a side effect.
+# The per-file block: "▸ [n/N] name SIZE [profile]", stream table, target.
+# Shared by real runs and --dry-run. Side effect: runs compute_track_selection
+# (stream_dispositions needs it).
 print_file_header() {
     local input_file="$1" input_size="$2" final_output="$3"
     local input_dir_h input_basename_h
@@ -2351,13 +2221,9 @@ print_file_header() {
     else
         src_disp="${GRAY}${input_dir_h}/${NC}${BOLD}${input_basename_h}${NC}"
     fi
-    # Profile info sits inline behind the name — no dedicated line.
     [[ -n "$CURRENT_PROFILE_FILE" ]] && prof="  ${ORANGE}[${CURRENT_PROFILE_TOKENS}]${NC}"
-    # Size is the headline figure — bold + coloured so it pops.
     echo -e "${GREEN}▸${NC} ${ctr}${src_disp}   ${BOLD}${ORANGE}$(human_size "$input_size")${NC}${prof}"
 
-    # Sidecar files muxed in from disk (external subs + .txt description),
-    # rendered as rows at the end of the stream table.
     local sidecars=""
     if $merge_subs; then
         local ext_subs sf
@@ -2371,7 +2237,6 @@ print_file_header() {
     ext_desc=$(find_description_file "$input_file")
     [[ -n "$ext_desc" ]] && sidecars+="txt"$'\t'"$(basename "$ext_desc")"$'\n'
 
-    # Track selection drives the per-stream disposition (av1/opus/copy/skip).
     compute_track_selection "$input_file"
     print_file_info "$input_file" "$(stream_dispositions)" "$sidecars"
     echo -e "  ${GRAY}→${NC} ${final_output}"
@@ -2385,9 +2250,9 @@ convert_file() {
     local input_file="$1"
 
     FILES_PROCESSED=$((FILES_PROCESSED + 1))
-    LAST_ENCODE_SECS=0   # only set once ffmpeg actually runs for this file
-    LAST_SSIM=""         # only set when the quality check runs and passes
-    LAST_INPUT_SIZE=0    # exported to main for byte-based batch ETA accounting
+    LAST_ENCODE_SECS=0
+    LAST_SSIM=""
+    LAST_INPUT_SIZE=0
 
     # -- Pre-checks ------------------------------------------------------------
     if [[ ! -f "$input_file" ]]; then
@@ -2405,18 +2270,17 @@ convert_file() {
         return 0
     fi
 
-    # Resolve this file's encoding config (CLI base + any .convert-profile).
-    # Done before the AV1 skip so a profile can enable --copy-streams cleanup.
+    # Profile resolution comes before the AV1 skip: a profile may enable
+    # --copy-streams, and remux mode must still clean already-AV1 files
     resolve_file_profile "$input_file"
 
-    # In remux mode we may want to clean an already-AV1 file, so don't skip it.
     if ! $copy_streams && is_av1 "$input_file"; then
         info "  Already AV1, skipping: $input_file"
         add_result "$input_file" "SKIPPED" "$input_size" 0 "already AV1"
         return 0
     fi
 
-    # -- Compute final output path (without creating temp files) ---------------
+    # -- Final output path (no temp files yet) ----------------------------------
     local input_dir_r input_basename_r input_noext_r final_output
     input_dir_r=$(dirname "$input_file")
     input_basename_r=$(basename "$input_file")
@@ -2427,9 +2291,7 @@ convert_file() {
         final_output="${output_dir}/${input_noext_r}.mkv"
     fi
 
-    # -- Output-name collision guard --------------------------------------------
-    # foo.mp4 + foo.avi both target foo.mkv; with -o, same-named files from
-    # different subdirs collide too — the first claimant wins, the rest skip.
+    # -- Output-name collision guard (foo.mp4 + foo.avi -> foo.mkv) -------------
     local claimant="${CLAIMED_OUTPUTS[$final_output]:-}"
     if [[ -n "$claimant" && "$claimant" != "$input_file" ]]; then
         warn "Output collision: $final_output already produced from $claimant — skipping: $input_file"
@@ -2438,20 +2300,16 @@ convert_file() {
     fi
     CLAIMED_OUTPUTS[$final_output]="$input_file"
 
-    # An existing output is only overwritten with -y (in-place .mkv -> .mkv
-    # replacement targets the source itself and is always allowed). Without -y
-    # a re-run of the same batch resumes where it left off. The source path is
-    # rebuilt from its dirname/basename so the comparison is canonical
-    # ("rich.mkv" and "./rich.mkv" are the same file).
+    # Existing outputs are only overwritten with -y; in-place .mkv -> .mkv
+    # (target == source) is always allowed. input_canon rebuilds the source
+    # path the same way final_output was built ("rich.mkv" vs "./rich.mkv").
     local input_canon="${input_dir_r}/${input_basename_r}"
     local output_exists=false
     if [[ -f "$final_output" && "$final_output" != "$input_canon" && -z "$overwrite" ]]; then
         output_exists=true
     fi
 
-    # -- Dry run ---------------------------------------------------------------
-    # Same header block as a real conversion (stream table incl. per-track
-    # dispositions), plus one note line for anything the table cannot express.
+    # -- Dry run: real header block + one note line for the rest ----------------
     if $dry_run; then
         echo ""
         print_file_header "$input_file" "$input_size" "$final_output"
@@ -2477,9 +2335,8 @@ convert_file() {
     fi
 
     # -- Disk space guard --------------------------------------------------------
-    # The temp output lives in the destination dir and can grow to roughly the
-    # input size before an early abort kicks in; failing here beats ffmpeg
-    # dying on ENOSPC an hour into an encode. Unknown free space never blocks.
+    # The temp can grow to ~input size; skipping now beats ffmpeg dying on
+    # ENOSPC an hour in. Unknown free space never blocks.
     local dest_dir free_bytes
     $in_place && dest_dir="$input_dir_r" || dest_dir="$output_dir"
     free_bytes=$(get_free_space "$dest_dir")
@@ -2497,9 +2354,8 @@ convert_file() {
 
     # -- Header ----------------------------------------------------------------
     echo ""
-    # Batch progress sits above the file header so it reads as a batch-level
-    # note, not as part of the next file's block. The remaining-time estimate
-    # is byte-based (bytes handled vs total), so it firms up as the batch runs.
+    # Batch progress above the file header — a batch-level note, not part of
+    # the next file's block. The ETA is byte-based and firms up over the run.
     if [[ "$FILES_TOTAL" -gt 1 && "$FILES_PROCESSED" -gt 1 ]]; then
         local bline="batch: $((FILES_PROCESSED - 1))/${FILES_TOTAL} done"
         [[ "$BATCH_SAVED_BYTES" -ne 0 ]] && bline+=" | saved $(human_size "$BATCH_SAVED_BYTES")"
@@ -2514,7 +2370,7 @@ convert_file() {
     fi
     print_file_header "$input_file" "$input_size" "$final_output"
 
-    # -- Resolve output path (creates temp files for atomicity) ----------------
+    # -- Resolve output path (creates the temp file) ----------------------------
     resolve_output_path "$input_file"
     final_output="$RESOLVED_FINAL"
     local temp_output="$RESOLVED_TEMP"
@@ -2526,7 +2382,7 @@ convert_file() {
 
     debug "CMD: ${cmd[*]}"
 
-    # -- Save source timestamps before conversion (for in-place where mv overwrites) --
+    # Source timestamps, saved before the in-place mv can overwrite them
     local ts_ref=""
     ts_ref=$(mktemp "${TMPDIR:-/tmp}/convert-${$}-tsref-XXXXXX") || true
     touch -r "$input_file" "$ts_ref" 2>/dev/null || true
@@ -2534,8 +2390,6 @@ convert_file() {
     # -- Run conversion --------------------------------------------------------
     local duration
     duration=$(get_duration_secs "$input_file")
-    # Estimate total video frames (duration * fps) — used for the progress bar
-    # in stream-copy mode, where ffmpeg reports out_time as N/A.
     local total_frames
     total_frames=$(get_total_frames "$input_file" "$duration")
     local start_time
@@ -2549,14 +2403,14 @@ convert_file() {
     stderr_log=$(mktemp "${TMPDIR:-/tmp}/convert-${$}-stderr-XXXXXX.log") || true
     CURRENT_STDERR_LOG="$stderr_log"
 
-    # Run ffmpeg piped to progress monitor.
-    # Use temp files for PID tracking and abort/skip signaling (subshell can't set parent vars).
+    # PID tracking and abort/skip signalling go through temp files — the
+    # monitor runs in a pipe subshell and cannot set parent variables
     local pid_file="" abort_signal="" skip_signal=""
     pid_file=$(mktemp "${TMPDIR:-/tmp}/convert-${$}-pid-XXXXXX") || true
     abort_signal=$(mktemp -u "${TMPDIR:-/tmp}/convert-${$}-abort-XXXXXX")
     skip_signal=$(mktemp -u "${TMPDIR:-/tmp}/convert-${$}-skip-XXXXXX")
 
-    # Start background key reader for skip support (main shell, not in pipe subshell)
+    # Key reader for ">" (skip file) — forked from the main shell, not the pipe
     local key_reader_pid=""
     if [[ -t 2 ]] && ! $no_progress; then
         local tty_saved
@@ -2569,7 +2423,6 @@ convert_file() {
                 if IFS= read -rsn1 ch < /dev/tty 2>/dev/null; then
                     if [[ "$ch" == ">" ]]; then
                         touch "$skip_signal"
-                        # Kill ffmpeg
                         local fpid
                         fpid=$(cat "$pid_file" 2>/dev/null || echo "")
                         if [[ -n "$fpid" ]]; then kill "$fpid" 2>/dev/null || true; fi
@@ -2586,17 +2439,14 @@ convert_file() {
         | run_progress_monitor "$duration" "$start_time" "$temp_output" "$input_size" "$pid_file" "$abort_signal" "$total_frames" \
         || ffmpeg_exit="${PIPESTATUS[0]}"
 
-    # Stop key reader and restore terminal
     if [[ -n "$key_reader_pid" ]]; then
         kill "$key_reader_pid" 2>/dev/null || true
         wait "$key_reader_pid" 2>/dev/null || true
         stty "$tty_saved" < /dev/tty 2>/dev/null || true
     fi
 
-    # Read ffmpeg PID from file (for cleanup trap)
     CURRENT_FFMPEG_PID=$(cat "$pid_file" 2>/dev/null || echo "")
 
-    # Check if early abort or skip was signaled
     if [[ -f "$abort_signal" ]]; then
         EARLY_ABORTED=true
         rm -f "$abort_signal"
@@ -2609,10 +2459,8 @@ convert_file() {
     fi
     rm -f "$pid_file"
 
-    # ffmpeg's own stderr is captured but not shown live. On a hard failure
-    # (not an interrupt/early-abort/user-skip) surface the tail so the reason
-    # isn't lost — the --log file stays synthetic (one line per file, written by
-    # add_result), so raw ffmpeg output no longer pollutes it.
+    # ffmpeg stderr is captured, not shown live; surface the tail on a hard
+    # failure only (not interrupt/early-abort/user-skip)
     if [[ "$ffmpeg_exit" -ne 0 && "$ffmpeg_exit" -ne 130 ]] \
        && ! $EARLY_ABORTED && ! $SKIP_REQUESTED && [[ -s "$stderr_log" ]]; then
         warn "ffmpeg failed (exit $ffmpeg_exit); last lines:"
@@ -2622,16 +2470,12 @@ convert_file() {
     rm -f "$stderr_log"
     CURRENT_STDERR_LOG=""
 
-    # Wall time of the ffmpeg run — recorded per file in --log via add_result.
     LAST_ENCODE_SECS=$(( $(date +%s) - start_time ))
 
-    # -- Post-process ----------------------------------------------------------
     post_process "$input_file" "$final_output" "$temp_output" "$ffmpeg_exit" \
         "$is_temp" "$input_size" "$ts_ref"
 
     rm -f "$ts_ref"
-
-    # -- Release lock ----------------------------------------------------------
     release_lock "$input_file"
 
     return 0
@@ -2641,9 +2485,10 @@ convert_file() {
 # Quality check (SSIM sampling)
 # ==============================================================================
 
-# Compute SSIM between source and output using sampled segments.
-# Samples 3 segments (10s each at 10%, 50%, 90% of the duration) for speed.
-# Returns the mean SSIM on stdout, or "N/A" on failure.
+# Mean SSIM over sampled segments (stdout), "N/A" on failure.
+# The explicit [0:v:0][1:v:0] pads are required throughout: a bare "ssim"
+# filter mis-selects streams when a cover/attached_pic second video stream is
+# present and silently returns N/A.
 compute_ssim_sampled() {
     local source="$1"
     local output="$2"
@@ -2651,9 +2496,7 @@ compute_ssim_sampled() {
     local dur
     dur=$(get_duration_secs "$source")
     if [[ "$dur" -lt 10 ]]; then
-        # Short file: compare the whole thing. Explicit [0:v:0][1:v:0] pads are
-        # required — a bare "ssim" picks streams wrongly when a cover/attached_pic
-        # second video stream is present (returns N/A otherwise).
+        # Short file: compare the whole thing
         local result
         result=$(ffmpeg -hide_banner -i "$source" -i "$output" \
             -filter_complex "[0:v:0][1:v:0]ssim" -f null /dev/null 2>&1 \
@@ -2662,8 +2505,7 @@ compute_ssim_sampled() {
         return
     fi
 
-    # Sample at N evenly-spaced points spanning 10%..90% of the duration
-    # (e.g. 3 -> 10/50/90%, 5 -> 10/30/50/70/90%). More points = more robust.
+    # N evenly-spaced sample points spanning 10%..90% of the duration
     local positions=()
     local n_samp="$quality_samples"
     [[ "$n_samp" -lt 1 ]] && n_samp=1
@@ -2680,8 +2522,7 @@ compute_ssim_sampled() {
     local total=0 count=0 i=0 n=${#positions[@]}
     for pos in "${positions[@]}"; do
         i=$((i + 1))
-        # Feedback on stderr (stdout carries the score) — this phase decodes
-        # both 1080p/4K streams and can run for a while with no other output.
+        # Feedback on stderr — stdout carries the score
         if ! $no_progress; then
             printf "\r  SSIM sampling %d/%d (@%s)...        " \
                 "$i" "$n" "$(format_duration "$pos")" >&2
@@ -2706,8 +2547,7 @@ compute_ssim_sampled() {
 
     local mean
     mean=$(echo "scale=6; $total / $count" | bc -l)
-    # bc omits leading zero
-    [[ "$mean" == .* ]] && mean="0${mean}"
+    [[ "$mean" == .* ]] && mean="0${mean}"   # bc omits the leading zero
     echo "$mean"
 }
 
@@ -2724,7 +2564,6 @@ post_process() {
     local input_size="$6"
     local ts_ref="${7:-}"
 
-    # Early abort case
     if $EARLY_ABORTED; then
         rm -f "$temp_output"
         CURRENT_TEMP_FILE=""
@@ -2747,7 +2586,6 @@ post_process() {
         return 0
     fi
 
-    # User skip case
     if $SKIP_REQUESTED; then
         rm -f "$temp_output"
         CURRENT_TEMP_FILE=""
@@ -2755,7 +2593,6 @@ post_process() {
         return 0
     fi
 
-    # ffmpeg error case
     if [[ "$ffmpeg_exit" -ne 0 ]]; then
         warn "Conversion failed (code $ffmpeg_exit): $input_file"
         rm -f "$temp_output"
@@ -2764,8 +2601,8 @@ post_process() {
         return 0
     fi
 
-    # Validate the freshly written temp output before placing it at the
-    # destination.
+    # All validation below runs on the temp, before the atomic mv — a rejected
+    # encode must never touch the destination (nor the in-place source)
     local output_size=0
     [[ -f "$temp_output" ]] && output_size=$(get_file_size "$temp_output")
 
@@ -2777,10 +2614,8 @@ post_process() {
         return 0
     fi
 
-    # A valid video output must be larger than just a container header (an MKV
-    # header alone is ~200-350 bytes). Anything under the unified min_size is
-    # corrupt for real content — capped at a tenth of the source so
-    # tiny-but-valid clips (short samples, test files) are not misflagged.
+    # Corrupt-output tripwire: min(min_size, input/10), hard floor 1K — the cap
+    # keeps tiny-but-valid clips from being misflagged
     local min_output_size=$(( input_size / 10 ))
     [[ "$min_output_size" -gt "$min_size" ]] && min_output_size="$min_size"
     [[ "$min_output_size" -lt 1024 ]] && min_output_size=1024
@@ -2792,9 +2627,7 @@ post_process() {
         return 0
     fi
 
-    # Quality check (SSIM sampling) — done on the temp before writing to the
-    # destination, so a rejected encode never touches the (possibly slow) target.
-    # Pointless in remux mode (streams are copied verbatim), so skipped there.
+    # SSIM check — pointless in remux mode (streams are copied verbatim)
     if $quality_check && ! $copy_streams && [[ -f "$input_file" ]]; then
         info "  Quality check (SSIM sampling)..."
         local ssim_score
@@ -2813,16 +2646,13 @@ post_process() {
                 return 0
             fi
             info "  SSIM: ${ssim_score} (min: ${quality_min_ssim})"
-            LAST_SSIM="$ssim_score"   # recorded in the --log note for calibration
+            LAST_SSIM="$ssim_score"
         fi
     fi
 
-    # Full-decode verification (--verify) — run on the temp before it can
-    # replace anything, and after the cheaper checks above. -xerror makes
-    # ffmpeg fail on the first decode error instead of soldiering on.
-    # Also forced on suspiciously small outputs (below the unified min_size):
-    # they passed the size tripwire but are cheap to decode in full, so prove
-    # they are real video.
+    # Full decode (-xerror = fail on first decode error). Forced on outputs
+    # below min_size: near-free at that size, and the size tripwire alone
+    # cannot tell a legit tiny clip from garbage.
     local force_verify=false
     [[ "$min_size" -gt 0 && "$output_size" -lt "$min_size" ]] && force_verify=true
     if $verify_output || $force_verify; then
@@ -2865,8 +2695,7 @@ post_process() {
     if [[ "$output_size" -gt "$input_size" ]]; then
         warn "Output larger: $(human_size "$output_size") vs $(human_size "$input_size") (saved=${saved_pct}%)"
 
-        # Record when the output is rejected for being larger (re-encoding it
-        # again is pointless). Logged before any source move so the path is right.
+        # Skip-logged before any source move so the recorded path stays right
         if $keep_best_version || $remove_if_bigger; then
             append_skip_log "$input_file" "$input_size" "output larger than source"
         fi
@@ -2897,7 +2726,7 @@ post_process() {
 
         if $remove_source; then
             if $in_place; then
-                # In-place: remove original only if extension differs from .mkv
+                # An in-place .mkv source IS the output — never remove it
                 local input_ext="${input_file##*.}"
                 if [[ "${input_ext,,}" != "mkv" ]]; then
                     debug "  Removing source (different extension): $input_file"
@@ -2908,7 +2737,7 @@ post_process() {
                 rm -f "$input_file"
             fi
 
-            # Clean up merged subtitle and description files
+            # Merged subs go with the source; .txt descriptions are always kept
             if $merge_subs; then
                 local sub_files
                 sub_files=$(find_subtitle_files "$input_file")
@@ -2918,7 +2747,6 @@ post_process() {
                     rm -f "$sf"
                 done <<< "$sub_files"
             fi
-            # Note: .txt description files are NOT removed (kept for reference)
         fi
 
         add_result "$input_file" "OK" "$input_size" "$output_size" \
@@ -2945,15 +2773,14 @@ print_summary() {
 
     for ((i = 0; i < count; i++)); do
         local file status in_sz out_sz note
-        # Keep the path (left-truncated) rather than the bare basename — with -r,
-        # two same-named episodes from different seasons must stay tellable apart.
+        # Relative path, left-truncated: with -r, same-named episodes from
+        # different seasons must stay tellable apart
         file="${SUMMARY_FILES[$i]#./}"
         status="${SUMMARY_STATUSES[$i]}"
         in_sz="${SUMMARY_INPUT_SIZES[$i]}"
         out_sz="${SUMMARY_OUTPUT_SIZES[$i]}"
         note="${SUMMARY_NOTES[$i]}"
 
-        # Truncate from the left if too long (the tail is the discriminating part)
         if [[ ${#file} -gt 48 ]]; then
             file="..${file: -46}"
         fi
@@ -3006,7 +2833,6 @@ print_summary() {
             "$file" "$status" "$in_h" "$out_h" "$gain_str" "$note"
     done
 
-    # Totals
     echo ""
     if [[ "$total_input" -gt 0 ]]; then
         local total_saved=$(( (total_input - total_output) * 100 / total_input ))
@@ -3025,7 +2851,7 @@ print_summary() {
 # Config banner
 # ==============================================================================
 
-# Print a banner line: "  key ......... value"
+# "  key ......... value"
 banner_line() {
     local key="$1" value="$2" color="${3:-$NC}"
     local dots
@@ -3033,7 +2859,6 @@ banner_line() {
     echo -e "  ${GRAY}${key} ${dots}${NC} ${color}${value}${NC}"
 }
 
-# Parse svtav1_options into a human-readable string
 format_svtav1_options() {
     local parts=()
 
@@ -3058,14 +2883,12 @@ print_banner() {
 
     echo -e "${GRAY}──${NC} ${BOLD}convert-to-av1 v${VERSION}${NC} ${GRAY}${sep:0:$((48 - 20 - ${#VERSION}))}${NC}"
 
-    # Output mode
     if $in_place; then
         banner_line "output" "in-place"
     else
         banner_line "output" "$output_dir"
     fi
 
-    # Encoder
     if $copy_streams; then
         banner_line "encoder" "remux only (no re-encode)" "$ORANGE"
     else
@@ -3073,7 +2896,6 @@ print_banner() {
         [[ -n "$content_type" ]] && banner_line "content" "$content_type"
     fi
 
-    # Audio
     if $copy_streams; then
         banner_line "audio" "copy"
     else
@@ -3084,15 +2906,13 @@ print_banner() {
         esac
     fi
 
-    # Language filtering (conditional)
     if [[ -n "$audio_langs" || -n "$sub_langs" ]]; then
         banner_line "keep langs" "audio: ${audio_langs:-all} | subs: ${sub_langs:-all}" "$ORANGE"
     fi
 
-    # Max height (conditional)
     [[ -n "$max_res" ]] && banner_line "max height" "${max_res}p" "$ORANGE"
 
-    # Flags — destructive flags in red, others in orange
+    # Destructive flags in red, the rest in orange
     local flags=()
     $keep_best_version && flags+=("smart")
     $remove_source && flags+=("${RED}rm-source${NC}")
@@ -3106,22 +2926,15 @@ print_banner() {
         banner_line "flags" "${flag_str%, }" "$ORANGE"
     fi
 
-    # Early abort (conditional)
     if $early_abort && ($remove_if_bigger || $keep_best_version); then
         banner_line "early abort" "${early_abort_threshold}%"
     fi
 
-    # Quality check (conditional)
     $quality_check && banner_line "quality check" "SSIM >= ${quality_min_ssim} (${quality_samples} samples)"
     $verify_output && banner_line "verify" "full decode of each output"
-
-    # Subtitles (conditional — only shown if enabled)
     $merge_subs && banner_line "subtitles" "merge .srt/.vtt"
-
-    # Per-directory profiles (shown unless disabled)
     $use_profiles && banner_line "profiles" ".convert-profile (per dir)"
 
-    # Batch options (conditional)
     [[ -n "$sort_by_size" ]] && banner_line "sort" "$sort_by_size"
     [[ "$min_size" -gt 0 ]] && banner_line "min size" "$(human_size "$min_size")"
     [[ ${#exclude_patterns[@]} -gt 0 ]] && banner_line "exclude" "${exclude_patterns[*]}"
@@ -3140,8 +2953,7 @@ print_banner() {
 
 main() {
     parse_args "$@"
-    # Snapshot the CLI encoding config before deriving options, so per-file
-    # .convert-profile resolution always starts from a clean base.
+    # Snapshotted before deriving options — profiles must overlay the raw CLI base
     snapshot_base_config
     apply_content_type
     build_svtav1_options
@@ -3161,25 +2973,20 @@ main() {
     FILES_TOTAL=${#sorted_files[@]}
     BATCH_START_TIME=$(date +%s)
 
-    # Total input size, captured up front: denominator of the byte-based batch
-    # ETA (sources may shrink or vanish as the batch runs).
+    # ETA denominator, captured up front — sources may shrink or vanish mid-batch
     for file in "${sorted_files[@]}"; do
         BATCH_TOTAL_BYTES=$((BATCH_TOTAL_BYTES + $(get_file_size "$file")))
     done
 
-    # Session banner into --log before the first encode (dry runs are never
-    # logged, so they get no header either).
     if [[ -n "$log_file" ]] && ! $dry_run; then
         write_log_session_header
     fi
 
     for file in "${sorted_files[@]}"; do
         convert_file "$file" || true
-        # convert_file exports the size it measured — no second stat per file.
         BATCH_DONE_BYTES=$((BATCH_DONE_BYTES + LAST_INPUT_SIZE))
     done
 
-    # Run --after command if specified
     if [[ -n "$after_cmd" ]]; then
         info "Running --after command: $after_cmd"
         eval "$after_cmd" || warn "--after command failed (exit $?)"

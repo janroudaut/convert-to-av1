@@ -9,7 +9,7 @@ bash -n convert-to-av1.sh              # Syntax check
 shellcheck convert-to-av1.sh           # Lint (static analysis)
 bash convert-to-av1.sh --help           # Show usage
 bash convert-to-av1.sh --dry-run .      # Test run (no conversion)
-bash test.sh                            # Integration suite (52 tests, synthetic files)
+bash test.sh                            # Integration suite (54 tests, synthetic files)
                                         # (runs via a wrapper injecting --min-size 0:
                                         #  synthetic clips are below the 128K default)
 ```
@@ -81,7 +81,10 @@ ffmpeg (with libsvtav1), ffprobe, python3, awk, bc, numfmt, stat, mktemp
   (time, status, sizes, saved%, took, note, path) — NOT raw ffmpeg stderr. ffmpeg
   errors surface to the terminal on hard failure instead. Wall time comes from
   `LAST_ENCODE_SECS`, the passing SSIM score from `LAST_SSIM` (both reset per
-  file in `convert_file`)
+  file in `convert_file`). Each session opens with a `# ...` comment banner
+  (`write_log_session_header`, called in `main` before the first encode; never
+  in dry-run). Header lines must stay tab-free — `print_log_stats` skips them
+  via its `NF >= 8` awk filter
 - Batch progress line ("batch: 3/12 done | saved … | ~… left") prints above each
   file header; its ETA is byte-based: `BATCH_TOTAL_BYTES` is snapshotted in
   `main` before the loop (sources may shrink/vanish), `BATCH_DONE_BYTES`

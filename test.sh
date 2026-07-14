@@ -1236,6 +1236,46 @@ test_hdr_metadata_preserved() {
 }
 test_hdr_metadata_preserved
 
+test_log_session_header() {
+    local dir="$TEST_DIR/loghdr"
+    mkdir -p "$dir"
+    generate_video "$dir/v.mp4" 2
+
+    "$CONVERT" -o "$dir/out" --log "$dir/log.tsv" --no-progress "$dir/v.mp4" >/dev/null 2>&1
+    local first
+    first=$(head -1 "$dir/log.tsv" 2>/dev/null)
+    if [[ "$first" == "# ── session"* ]] && grep -q "^# files: 1 queued" "$dir/log.tsv"; then
+        pass "--log starts with a commented session header"
+    else
+        fail "--log starts with a commented session header" "header missing or malformed: '$first'"
+    fi
+
+    # The comment lines must not confuse --stats (tab-based NF filter skips them)
+    local output
+    output=$("$CONVERT" --stats "$dir/log.tsv" 2>&1)
+    if echo "$output" | grep -q "OK         1"; then
+        pass "--stats ignores the session header comments"
+    else
+        fail "--stats ignores the session header comments" "stats miscounted with header present"
+    fi
+}
+test_log_session_header
+
+test_log_profile_flags() {
+    local dir="$TEST_DIR/logprof"
+    mkdir -p "$dir/toons"
+    echo "--cartoon" > "$dir/toons/.convert-profile"
+    generate_video "$dir/toons/v.mp4" 2
+
+    "$CONVERT" -o "$dir/out" --log "$dir/log.tsv" --no-progress "$dir/toons/v.mp4" >/dev/null 2>&1
+    if grep -q "\[--cartoon\]" "$dir/log.tsv" 2>/dev/null; then
+        pass "profile flags recorded in the file log line"
+    else
+        fail "profile flags recorded in the file log line" "no [--cartoon] in the log entry"
+    fi
+}
+test_log_profile_flags
+
 test_ssim_in_log() {
     local dir="$TEST_DIR/ssimlog"
     mkdir -p "$dir"

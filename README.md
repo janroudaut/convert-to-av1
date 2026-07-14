@@ -342,15 +342,20 @@ OK: 1 | Skip: 1 | Abort: 0 | Fail: 1 | Total: 3 | elapsed: 00:48:12
 ```
 
 With `--log FILE`, each file also gets one synthetic, tab-separated line (no colours, no
-progress bar) — easy to `grep`/`awk`/sort across runs:
+progress bar) — easy to `grep`/`awk`/sort across runs. Each session opens with a commented
+header (written before the first encode, so the log is `tail -f`-able from the start):
 
 ```
+# ── session 2026-07-12T21:14:01+02:00 — convert-to-av1 v3.4.0
+# output: in-place | encoder: SVT-AV1 preset=8 crf=28 10-bit grain=off | audio: auto > 200 kb/s
+# flags: smart, rm-source, quality-check>=0.92 | early-abort: 15%
+# files: 3 queued (7.9G)
 2026-07-12T21:14:03+02:00  OK        in=7.2G  out=2.8G  saved=61%  took=00:29:42  saved 61% (4.4G) ssim=0.973214  S01E05 - Got Milk.mkv
 2026-07-12T21:14:05+02:00  SKIPPED   in=500M  out=-     saved=-    took=-         already AV1        already_av1.mkv
 2026-07-12T22:02:20+02:00  FAILED    in=200M  out=-     saved=-    took=-         ffmpeg exit 1      broken_file.avi
 ```
 
-When `--quality-check` is active, the measured SSIM of each successful encode is recorded in the note (`ssim=…`) — handy for calibrating `--min-ssim` across a library after the fact.
+When `--quality-check` is active, the measured SSIM of each successful encode is recorded in the note (`ssim=…`) — handy for calibrating `--min-ssim` across a library after the fact. Files converted under a `.convert-profile` carry its flags in their log line (e.g. `[--cartoon]`), so the effective per-file settings are always reconstructible: CLI-level config from the session header, profile overrides from the file's own line.
 
 `--stats` turns that accumulated log into a report:
 

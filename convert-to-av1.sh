@@ -407,10 +407,61 @@ write_log_line() {
         saved="$(( (in_sz - out_sz) * 100 / in_sz ))%"
     fi
     [[ "$LAST_ENCODE_SECS" -gt 0 ]] && took=$(format_duration "$LAST_ENCODE_SECS")
+    # Profile flags vary per file — the session banner only carries the CLI base
+    [[ -n "$CURRENT_PROFILE_TOKENS" ]] && note="${note:+$note }[${CURRENT_PROFILE_TOKENS}]"
     printf '%s\t%-8s\tin=%s\tout=%s\tsaved=%s\ttook=%s\t%s\t%s\n' \
         "$ts" "$status" "$(human_size "$in_sz")" "$out_disp" "$saved" \
         "$took" "${note:-}" "$file" >> "$log_file" 2>/dev/null \
         || warn "Could not write log: $log_file"
+}
+
+# Write a per-session banner into --log as "# ..." comment lines: date,
+# version, effective config, queue size. Written before the first encode so
+# the log exists (and is tail -f-able) from the very start of the batch.
+# Spaces and pipes only — never tabs, so print_log_stats keeps skipping these
+# lines via its NF filter.
+write_log_session_header() {
+    local enc audio
+    if $copy_streams; then
+        enc="remux only (no re-encode)"
+    else
+        enc=$(format_svtav1_options)
+        [[ -n "$content_type" ]] && enc+=" content=${content_type}"
+    fi
+    case "$audio_mode" in
+        opus) audio="opus (always)" ;;
+        auto) audio="auto > ${audio_bitrate_threshold} kb/s" ;;
+        *)    audio="copy" ;;
+    esac
+
+    local line3="" flags=()
+    $keep_best_version && flags+=("smart")
+    $remove_source && flags+=("rm-source")
+    $remove_if_bigger && flags+=("rm-if-bigger")
+    $recursive && flags+=("recursive")
+    [[ -n "$overwrite" ]] && flags+=("overwrite")
+    $quality_check && flags+=("quality-check>=${quality_min_ssim}")
+    $verify_output && flags+=("verify")
+    if [[ ${#flags[@]} -gt 0 ]]; then
+        local flag_str
+        flag_str=$(printf '%s, ' "${flags[@]}")
+        line3+="flags: ${flag_str%, }"
+    fi
+    if [[ -n "$audio_langs" || -n "$sub_langs" ]]; then
+        line3+="${line3:+ | }langs: audio=${audio_langs:-all} subs=${sub_langs:-all}"
+    fi
+    if $early_abort && { $remove_if_bigger || $keep_best_version; }; then
+        line3+="${line3:+ | }early-abort: ${early_abort_threshold}%"
+    fi
+    $use_profiles && line3+="${line3:+ | }profiles: per-dir"
+
+    {
+        printf '# ── session %s — convert-to-av1 v%s\n' "$(date -Iseconds)" "$VERSION"
+        printf '# output: %s | encoder: %s | audio: %s\n' \
+            "$($in_place && echo "in-place" || echo "$output_dir")" "$enc" "$audio"
+        [[ -n "$line3" ]] && printf '# %s\n' "$line3"
+        printf '# files: %s queued (%s)\n' "$FILES_TOTAL" "$(human_size "$BATCH_TOTAL_BYTES")"
+    } >> "$log_file" 2>/dev/null || warn "Could not write log: $log_file"
 }
 
 # Summarise a --log TSV (see write_log_line for the format) and exit.
@@ -3115,6 +3166,12 @@ main() {
     for file in "${sorted_files[@]}"; do
         BATCH_TOTAL_BYTES=$((BATCH_TOTAL_BYTES + $(get_file_size "$file")))
     done
+
+    # Session banner into --log before the first encode (dry runs are never
+    # logged, so they get no header either).
+    if [[ -n "$log_file" ]] && ! $dry_run; then
+        write_log_session_header
+    fi
 
     for file in "${sorted_files[@]}"; do
         convert_file "$file" || true

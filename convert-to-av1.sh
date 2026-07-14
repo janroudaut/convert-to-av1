@@ -56,7 +56,10 @@ dry_run=false
 sort_by_size=""
 no_progress=false
 early_abort=true
-early_abort_threshold=8
+# Progress % at which the size estimate is trusted. Early savings are often
+# misleading (title cards, credits, dark intros compress atypically) and real
+# gains frequently only show past ~10% — 15% leaves a safety margin beyond that.
+early_abort_threshold=15
 merge_subs=true
 recursive=false
 audio_langs=""  # comma-separated language codes to keep (empty = keep all)
@@ -1394,7 +1397,7 @@ BATCH:
                                 larger) and skip them on re-runs. Default FILE:
                                 .convert-skip.list at the input root
   --no-early-abort              Don't abort if output is estimated larger
-  --early-abort-threshold PCT   Progress % at which to evaluate (default: 8)
+  --early-abort-threshold PCT   Progress % at which to evaluate (default: 15)
   --after CMD                   Run CMD after the batch completes
 
 AUDIO:

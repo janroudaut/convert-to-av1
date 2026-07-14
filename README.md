@@ -9,7 +9,7 @@ Batch video converter to AV1 using FFmpeg and SVT-AV1. Designed to reduce storag
 - **In-place conversion** (default) or output to a separate directory
 - **MPEG-TS fix** — auto-detects `.ts` containers and applies timestamp correction flags
 - **Smart mode** — keeps the best version (source or output) based on file size
-- **Early abort** — stops encoding at ~8% if the output is estimated to be larger than the source
+- **Early abort** — stops encoding at ~15% if the output is estimated to be larger than the source
 - **Subtitle merging** — auto-detects adjacent `.srt`/`.vtt` files (including multi-language) and muxes them into the output MKV
 - **Description embedding** — reads adjacent `.txt` files and embeds them as MKV `description` metadata
 - **Audio re-encoding** — optional Opus re-encoding with automatic bitrate detection; decided **per stream**, so 5.1/7.1 tracks keep their native channels (no downmix)
@@ -152,7 +152,7 @@ All presets use 10-bit encoding, enable-overlays, and scene-change detection. Fi
 | `--skip-log[=FILE]` | Record files not worth converting and skip them on re-runs |
 | `--dry-run` | Preview without converting — shows the same per-file stream table (incl. per-track decisions) as a real run |
 | `--no-early-abort` | Disable early abort when output is estimated larger |
-| `--early-abort-threshold PCT` | Progress % at which to evaluate (default: 8) |
+| `--early-abort-threshold PCT` | Progress % at which to evaluate (default: 15 — early savings are misleading, real gains often only show past ~10%) |
 | `--after CMD` | Run CMD after the batch completes |
 
 **Skip log (`--skip-log`):** when re-converting a directory, files that came out *not worth it* — SSIM below the target, or AV1 larger than the source — are recorded and **skipped on the next run**, so a repeat batch doesn't waste time re-encoding known losers. The log defaults to `.convert-skip.list` at the input root (override with `--skip-log=FILE`); paths are stored relative to it (portable if the tree moves) and a recorded source size means a **changed file is retried**. Each entry keeps the size, source mtime, and reason.
@@ -301,7 +301,7 @@ flowchart TD
 4. **Merge** — detects and includes adjacent subtitle/description files
 5. **Select tracks** — keeps all streams by default, or filters audio/subtitles by language; only the first video stream is encoded to AV1 while cover-art/thumbnail streams are copied verbatim
 6. **Encode** — runs FFmpeg with SVT-AV1 (per-stream audio codec), piping progress to a real-time monitor
-7. **Early abort** — at the configured threshold (default 8%), estimates final output size; aborts if it would be larger than input (only when `--smart` or `--rm-if-bigger`)
+7. **Early abort** — at the configured threshold (default 15%), estimates final output size; aborts if it would be larger than input (only when `--smart` or `--rm-if-bigger`)
 8. **Post-process** — handles smart mode logic, source removal, in-place file swap; detects corrupt outputs (below `min(--min-size, input/10)`, plus a full decode — forced for sub-`--min-size` outputs, everywhere with `--verify`)
 9. **Summary** — prints a table of all results with sizes and savings
 

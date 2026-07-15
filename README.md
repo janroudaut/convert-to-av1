@@ -240,7 +240,7 @@ Drop a `.convert-profile` file into a directory (or any parent) and its flags ar
 
 - Resolved **per file**: the tool walks up from each file's directory and uses the first `.convert-profile` it finds.
 - One flag per line or space-separated; `#` starts a comment.
-- Supports the encoding/quality/audio/track flags (`--movie`, `--cartoon`, `--tv`, `--hq`, `--fast`, `--crf`, `--preset`, `--1080`, `--opus`, `--langs`, `--copy-streams`, …). Batch/output flags (`-o`, `-r`, `--smart`, …) are ignored in profiles.
+- Supported flags: presets (`--fast`/`--sd`, `--hq`, `--cartoon`, `--tv`, `--movie`), encoding (`--crf`, `--preset`), resolution (`--max-res`, `--1080`, `--720`), audio (`--copy-audio`, `--opus`, `--auto-audio`, `--audio-threshold`), track selection (`--langs`, `--audio-langs`, `--sub-langs`) and `--copy-streams`/`--remux`. Anything else (batch/output flags like `-o`, `-r`, `--smart`) is ignored with a warning — a bad profile never kills a batch.
 - Profile flags override the CLI base for that file.
 
 ```bash

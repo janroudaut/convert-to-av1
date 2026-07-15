@@ -1282,7 +1282,9 @@ kill_descendants() {
 cleanup() {
     local exit_code=$?
 
-    { stty sane < /dev/tty; } 2>/dev/null || true
+    # TTOU must be ignored: from a non-foreground process group (timeout(1)
+    # setpgid's its child) stty would be SIGSTOPped and hang the exit forever
+    { trap '' TTOU; stty sane < /dev/tty; trap - TTOU; } 2>/dev/null || true
 
     # Only signal exits (>= 128: Ctrl-C, TERM) are an interruption; plain error
     # exits have nothing running and clean up silently

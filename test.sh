@@ -1280,7 +1280,8 @@ test_stats_live() {
         > "$dir/log.tsv"
 
     local output rc
-    output=$(timeout 3 "$CONVERT" --stats-live "$dir/log.tsv" 2>&1); rc=$?
+    # --foreground: keep the child in our process group so it can touch the tty
+    output=$(timeout --foreground 3 "$CONVERT" --stats-live "$dir/log.tsv" 2>&1); rc=$?
     if [[ $rc -eq 124 ]] && echo "$output" | grep -q "OK         1"; then
         pass "--stats-live follows a --log file (killed by timeout)"
     else

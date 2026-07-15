@@ -587,7 +587,7 @@ print_log_stats() {
     [[ -f "$f" ]] || die "Log file not found: $f"
     echo -e "${BOLD}convert-to-av1 v${VERSION} — stats for ${f}${NC}"
     echo ""
-    awk -F'\t' '
+    awk -F'\t' -v G="$GREEN" -v R="$RED" -v O="$ORANGE" -v D="$GRAY" -v NC="$NC" '
         # human size -> bytes ("in=1.2M" / "out=637K" / "-")
         function hb(s,    n, u) {
             sub(/^(in|out)=/, "", s)
@@ -631,14 +631,21 @@ print_log_stats() {
                 }
             }
         }
+        function stcolor(st) {
+            if (st == "OK")      return G
+            if (st == "FAILED" || st == "NOTFOUND") return R
+            if (st == "ABORTED") return O
+            if (st == "SKIPPED") return D
+            return ""
+        }
         END {
             if (!total) { print "  (empty log)"; exit }
-            for (st in cnt) printf "  %-10s %d\n", st, cnt[st]
+            for (st in cnt) printf "  %s%-10s%s %d\n", stcolor(st), st, NC, cnt[st]
             printf "  %-10s %d\n", "total", total
             print ""
             if (tin > 0) {
-                printf "  converted ......... %s -> %s (saved %s, %d%%)\n",
-                       hs(tin), hs(tout), hs(tin - tout), (tin - tout) * 100 / tin
+                printf "  converted ......... %s -> %s (%ssaved %s, %d%%%s)\n",
+                       hs(tin), hs(tout), G, hs(tin - tout), (tin - tout) * 100 / tin, NC
                 if (tsecs > 0) {
                     printf "  encode time ....... %s total", dur(tsecs)
                     if (timed > 0) printf ", avg %dm/file", tsecs / timed / 60
@@ -664,13 +671,34 @@ print_log_stats_live() {
             [[ -t 1 ]] && printf '\033[H\033[2J'
             if [[ -f "$f" ]]; then
                 print_log_stats "$f"
+                print_log_last_event "$f"
             else
-                echo "Waiting for log file: $f"
+                echo -e "${GRAY}Waiting for log file: ${f}${NC}"
             fi
-            [[ -t 1 ]] && printf '\n  (live — Ctrl-C to quit)\n'
+            [[ -t 1 ]] && printf "\n  ${GREEN}● live${NC} ${GRAY}— refreshed %s — Ctrl-C to quit${NC}\n" "$(date +%H:%M:%S)"
         fi
         sleep 2
     done
+}
+
+# Last TSV line of the log, condensed (live mode: what just happened, when).
+# Parsed inside awk: empty fields + tab-whitespace IFS would shift a bash read
+print_log_last_event() {
+    awk -F'\t' -v G="$GREEN" -v R="$RED" -v O="$ORANGE" -v D="$GRAY" -v NC="$NC" '
+        NF >= 8 { ts = $1; st = $2; note = $7; path = $8 }
+        END {
+            if (ts == "") exit
+            gsub(/ +$/, "", st)
+            c = ""
+            if (st == "OK") c = G
+            else if (st == "FAILED" || st == "NOTFOUND") c = R
+            else if (st == "ABORTED") c = O
+            else if (st == "SKIPPED") c = D
+            n = split(path, a, "/")
+            printf "  last event ........ %s%s%s  %s%s%s  %s%s\n",
+                   D, ts, NC, c, st, NC, a[n],
+                   (note == "" ? "" : "  " D "(" note ")" NC)
+        }' "$1"
 }
 
 add_result() {

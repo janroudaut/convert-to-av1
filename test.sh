@@ -828,6 +828,28 @@ test_cli_overrides_profile() {
 }
 test_cli_overrides_profile
 
+# The banner reflects the input root's profile (effective values + path),
+# and profile tokens accept --opt=value and quoted values.
+test_banner_root_profile() {
+    local dir="$TEST_DIR/banner-root"
+    mkdir -p "$dir"
+    printf '%s\n' '--ssim-samples=12' "--exclude='*junk*'" > "$dir/.convert-profile"
+    generate_video "$dir/ep.mp4" 2
+    generate_video "$dir/junk-ep.mp4" 2
+
+    local output
+    output=$("$CONVERT" --no-progress --dry-run "$dir" 2>&1)
+
+    if echo "$output" | grep -q "root: .*\.convert-profile" \
+        && echo "$output" | grep -q "12 samples" \
+        && ! echo "$output" | grep -q "junk-ep.*DRYRUN"; then
+        pass "banner shows root profile; --opt=value and quotes are normalised"
+    else
+        fail "banner root profile" "missing root profile line, 12 samples, or junk not excluded"
+    fi
+}
+test_banner_root_profile
+
 # --sort-by-date from the input root's profile orders the batch (asc = oldest first).
 test_profile_sort_by_date() {
     local dir="$TEST_DIR/profile-sort"

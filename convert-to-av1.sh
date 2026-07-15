@@ -374,13 +374,32 @@ resolve_file_profile() {
         pf=$(find_profile_file "$input_file")
         if [[ -n "$pf" ]]; then
             local -a toks=()
-            local line
+            local line tk
             while IFS= read -r line || [[ -n "$line" ]]; do
                 line="${line%%#*}"                 # strip comments
                 [[ -z "${line// /}" ]] && continue
                 local -a lt=()
                 read -ra lt <<< "$line"
-                toks+=("${lt[@]}")
+                # Normalise: --opt=value splits in two, and one pair of
+                # surrounding quotes is stripped — profiles have no shell
+                for tk in "${lt[@]+"${lt[@]}"}"; do
+                    case "$tk" in
+                        --skip-log=*) : ;;   # keeps its = form (bare form exists too)
+                        --*=*) toks+=("${tk%%=*}"); tk="${tk#*=}" ;;
+                    esac
+                    case "$tk" in
+                        --skip-log=*)
+                            local v="${tk#*=}"
+                            case "$v" in
+                                \'*\') v="${v#\'}"; v="${v%\'}" ;;
+                                \"*\") v="${v#\"}"; v="${v%\"}" ;;
+                            esac
+                            tk="--skip-log=${v}" ;;
+                        \'*\') tk="${tk#\'}"; tk="${tk%\'}" ;;
+                        \"*\") tk="${tk#\"}"; tk="${tk%\"}" ;;
+                    esac
+                    toks+=("$tk")
+                done
             done < "$pf"
             CURRENT_PROFILE_FILE="$pf"
             CURRENT_PROFILE_DIR=$(dirname "$pf")
@@ -3169,7 +3188,13 @@ print_banner() {
     $quality_check && banner_line "quality check" "SSIM >= ${quality_min_ssim} (${quality_samples} samples)"
     $verify_output && banner_line "verify" "full decode of each output"
     $merge_subs && banner_line "subtitles" "merge .srt/.vtt"
-    $use_profiles && banner_line "profiles" ".convert-profile (per dir)"
+    if $use_profiles; then
+        if [[ -n "$CURRENT_PROFILE_FILE" ]]; then
+            banner_line "profiles" "root: ${CURRENT_PROFILE_FILE} [${CURRENT_PROFILE_TOKENS}]"
+        else
+            banner_line "profiles" ".convert-profile (per dir)"
+        fi
+    fi
 
     [[ -n "$sort_by_size" ]] && banner_line "sort" "size $sort_by_size"
     [[ -n "$sort_by_date" ]] && banner_line "sort" "date $sort_by_date"
@@ -3196,6 +3221,15 @@ main() {
     build_svtav1_options
     check_dependencies
     activate_skip_log
+
+    # Resolve the input root's profile first: the banner must show effective
+    # values (12 samples, sort, ...), not the raw CLI base — deeper directories
+    # may still override per file
+    if $use_profiles && [[ ${#input_args[@]} -gt 0 ]]; then
+        local banner_root="${input_args[0]}"
+        [[ -d "$banner_root" ]] && banner_root="${banner_root%/}/."
+        resolve_file_profile "$banner_root"
+    fi
 
     print_banner
 

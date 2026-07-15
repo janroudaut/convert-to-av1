@@ -240,7 +240,8 @@ Drop a `.convert-profile` file into a directory (or any parent) and its flags ar
 | `--no-profile` | Ignore all `.convert-profile` files |
 
 - Resolved **per file**: the tool walks up from each file's directory and uses the first `.convert-profile` it finds.
-- One flag per line or space-separated; `#` starts a comment.
+- One flag per line or space-separated; `#` starts a comment. Both `--opt value` and `--opt=value` work, and a pair of surrounding quotes around a value is stripped (there is no shell to do it) — `--exclude='*junk*'` behaves as expected.
+- The startup banner shows the **input root's** profile (path + flags) and the effective values it produces; deeper directories may still override per file.
 - Supported flags: presets (`--fast`/`--sd`, `--hq`, `--cartoon`, `--tv`, `--movie`), encoding (`--crf`, `--preset`), resolution (`--max-res`, `--1080`, `--720`), audio (`--copy-audio`, `--opus`, `--auto-audio`, `--audio-threshold`), track selection (`--langs`, `--audio-langs`, `--sub-langs`), quality (`--quality-check`, `--min-ssim`, `--ssim-samples`, `--verify`), early abort (`--no-early-abort`, `--early-abort-threshold`), `--no-merge-subs`, `--copy-streams`/`--remux`, and logging (`--log FILE`, `--skip-log[=FILE]`).
 - Relative `--log`/`--skip-log` paths anchor to the profile's directory — `--log av1-convert.log` in a series folder keeps one log per series regardless of where the batch was launched; a bare `--skip-log` uses `.convert-skip.list` next to the profile.
 - Filtering and ordering work too: `--exclude` (appends to the CLI patterns — folder-specific junk stays out) and `--min-size` apply per file; `--sort-by-size`/`--sort-by-date` are honored from the **first input root's** profile only, since ordering is batch-global.

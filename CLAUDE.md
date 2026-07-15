@@ -160,7 +160,10 @@ ffmpeg (with libsvtav1), ffprobe, python3, awk, bc, numfmt, stat, mktemp
   via `cli_set` in apply_profile_tokens); profiles beat defaults. The
   `cli_set g || { ... }` guards are errexit-safe: a failed inner
   `profile_* && {}` list doesn't propagate (verified empirically), and every
-  case arm ends status-0
+  case arm ends status-0. Profile tokens are normalised at read time
+  (`--opt=value` splits, one pair of surrounding quotes stripped — no shell
+  in a dotfile); `main` resolves the input root's profile before
+  `print_banner` so the banner shows effective values + the root profile line
 
 ## Code Style
 - All code, comments, CLI output, and docs must be in English

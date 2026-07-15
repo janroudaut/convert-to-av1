@@ -790,22 +790,43 @@ test_profile_exclude() {
 }
 test_profile_exclude
 
-# --min-size in a profile overrides the CLI value (the wrapper's --min-size 0).
+# --min-size from a profile applies when the CLI didn't set one (direct bin,
+# not the wrapper: its --min-size 0 is explicit and would win).
 test_profile_min_size() {
     local dir="$TEST_DIR/profile-minsize"
     mkdir -p "$dir"
     printf '%s\n' '--min-size 500M' > "$dir/.convert-profile"
-    generate_video "$dir/small.mp4" 1 160x120
+    generate_video "$dir/big.mp4" 3 1920x1080
 
-    "$CONVERT" --no-progress --fast "$dir/small.mp4" >/dev/null 2>&1 && rc=0 || rc=$?
+    bash "$CONVERT_BIN" --no-progress --fast "$dir/big.mp4" >/dev/null 2>&1 && rc=0 || rc=$?
 
-    if [[ ! -f "$dir/small.mkv" ]]; then
-        pass "profile --min-size skips a too-small file"
+    if [[ ! -f "$dir/big.mkv" ]]; then
+        pass "profile --min-size skips a below-threshold file"
     else
-        fail "profile --min-size" "small file was converted despite profile threshold"
+        fail "profile --min-size" "file was converted despite profile threshold"
     fi
 }
 test_profile_min_size
+
+# Explicit CLI flags beat the profile; defaults don't block it.
+test_cli_overrides_profile() {
+    local dir="$TEST_DIR/cli-wins"
+    mkdir -p "$dir"
+    printf '%s\n' '--720' > "$dir/.convert-profile"
+    generate_video "$dir/ep.mp4" 3 1920x1080
+
+    "$CONVERT" --no-progress --fast --1080 "$dir/ep.mp4" >/dev/null 2>&1 && rc=0 || rc=$?
+
+    local height
+    height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height \
+        -of csv=p=0 "$dir/ep.mkv" 2>/dev/null | head -1 | tr -d '[:space:]')
+    if [[ $rc -eq 0 ]] && [[ "${height:-0}" -eq 1080 ]]; then
+        pass "explicit CLI --1080 overrides profile --720"
+    else
+        fail "CLI precedence" "height ${height}, expected 1080 (exit $rc)"
+    fi
+}
+test_cli_overrides_profile
 
 # --sort-by-date from the input root's profile orders the batch (asc = oldest first).
 test_profile_sort_by_date() {

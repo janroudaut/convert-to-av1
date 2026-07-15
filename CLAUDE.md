@@ -155,7 +155,12 @@ ffmpeg (with libsvtav1), ffprobe, python3, awk, bc, numfmt, stat, mktemp
   collection filter loop resolves each candidate's profile before testing.
   `--sort-by-size`/`--sort-by-date` come from the FIRST input root's profile
   only (ordering is batch-global). Destructive flags are deliberately NOT
-  accepted — a dotfile must never delete files
+  accepted — a dotfile must never delete files. Precedence: explicit CLI
+  flags beat profiles (`CLI_EXPLICIT` groups marked in parse_args, checked
+  via `cli_set` in apply_profile_tokens); profiles beat defaults. The
+  `cli_set g || { ... }` guards are errexit-safe: a failed inner
+  `profile_* && {}` list doesn't propagate (verified empirically), and every
+  case arm ends status-0
 
 ## Code Style
 - All code, comments, CLI output, and docs must be in English

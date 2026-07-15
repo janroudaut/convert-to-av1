@@ -112,6 +112,9 @@ declare -A LOG_HEADER_WRITTEN=()
 # -- Per-directory profile state -----------------------------------------------
 # Base (CLI) encoding config, snapshotted so per-file profiles start clean.
 declare -A BASE_CFG=()
+# Option groups explicitly given on the command line — a profile never
+# overrides what the user typed for THIS run (defaults don't block anything)
+declare -A CLI_EXPLICIT=()
 CURRENT_PROFILE_FILE=""   # path of the .convert-profile applied to current file
 CURRENT_PROFILE_DIR=""    # its directory — anchors relative --log/--skip-log paths
 CURRENT_PROFILE_TOKENS="" # its raw tokens, for display
@@ -230,6 +233,8 @@ profile_size() {
     return 1
 }
 
+cli_set() { [[ -n "${CLI_EXPLICIT[$1]:-}" ]]; }
+
 # Relative --log/--skip-log values in a profile anchor to the profile's dir
 profile_path() {
     case "$1" in
@@ -240,41 +245,66 @@ profile_path() {
 
 # Profile-safe subset of parse_args. Value-taking options consume 2 tokens
 # when the value is present, 1 otherwise.
+# Precedence: explicit CLI flags (CLI_EXPLICIT groups) always win — a profile
+# only fills what the user did not type for this run. Same-direction booleans
+# (--verify, --quality-check) and appending --exclude need no guard.
 apply_profile_tokens() {
     local n
     while [[ $# -gt 0 ]]; do
         n=1; [[ $# -ge 2 ]] && n=2
         case "$1" in
-            --sd|--fast)   svt_preset=10; svt_crf=32; svt_film_grain=0; speed_preset="fast"
-                           svt_preset_explicit=false; svt_crf_explicit=false; shift ;;
-            --hq)          svt_preset=4; svt_crf=28; svt_film_grain=8; speed_preset="hq"
-                           svt_preset_explicit=false; svt_crf_explicit=false
-                           [[ "$audio_mode" == "auto" ]] && audio_mode="copy"; shift ;;
-            --cartoon)     content_type="cartoon"; shift ;;
-            --tv)          content_type="tv"; shift ;;
-            --movie)       content_type="movie"; shift ;;
-            --crf)         profile_uint "$1" "${2:-}" && { svt_crf="$2"; svt_crf_explicit=true; }; shift "$n" ;;
-            --preset)      profile_uint "$1" "${2:-}" && { svt_preset="$2"; svt_preset_explicit=true; }; shift "$n" ;;
+            --sd|--fast)   cli_set speed || { svt_preset=10; svt_crf=32; svt_film_grain=0
+                               speed_preset="fast"
+                               svt_preset_explicit=false; svt_crf_explicit=false; }
+                           shift ;;
+            --hq)          cli_set speed || { svt_preset=4; svt_crf=28; svt_film_grain=8
+                               speed_preset="hq"
+                               svt_preset_explicit=false; svt_crf_explicit=false
+                               [[ "$audio_mode" == "auto" ]] && audio_mode="copy"; true; }
+                           shift ;;
+            --cartoon)     cli_set content || content_type="cartoon"; shift ;;
+            --tv)          cli_set content || content_type="tv"; shift ;;
+            --movie)       cli_set content || content_type="movie"; shift ;;
+            --crf)         cli_set crf \
+                               || { profile_uint "$1" "${2:-}" && { svt_crf="$2"; svt_crf_explicit=true; }; }
+                           shift "$n" ;;
+            --preset)      cli_set preset \
+                               || { profile_uint "$1" "${2:-}" && { svt_preset="$2"; svt_preset_explicit=true; }; }
+                           shift "$n" ;;
             --max-res|--max-h|--max-height)
-                           profile_uint "$1" "${2:-}" && max_res="$2"; shift "$n" ;;
-            --1080|--1080p) max_res="1080"; shift ;;
-            --720|--720p)  max_res="720"; shift ;;
-            --copy-audio)  audio_mode="copy"; shift ;;
-            --opus)        audio_mode="opus"; shift ;;
-            --auto-audio)  audio_mode="auto"; shift ;;
+                           cli_set maxres || { profile_uint "$1" "${2:-}" && max_res="$2"; }
+                           shift "$n" ;;
+            --1080|--1080p) cli_set maxres || max_res="1080"; shift ;;
+            --720|--720p)  cli_set maxres || max_res="720"; shift ;;
+            --copy-audio)  cli_set audio_mode || audio_mode="copy"; shift ;;
+            --opus)        cli_set audio_mode || audio_mode="opus"; shift ;;
+            --auto-audio)  cli_set audio_mode || audio_mode="auto"; shift ;;
             --audio-threshold)
-                           profile_uint "$1" "${2:-}" && { audio_bitrate_threshold="$2"; audio_mode="auto"; }; shift "$n" ;;
+                           if ! cli_set audio_threshold && profile_uint "$1" "${2:-}"; then
+                               audio_bitrate_threshold="$2"
+                               cli_set audio_mode || audio_mode="auto"
+                           fi
+                           shift "$n" ;;
             --langs|--lang)
-                           profile_str "$1" "${2:-}" && { audio_langs="$2"; sub_langs="$2"; }; shift "$n" ;;
+                           if profile_str "$1" "${2:-}"; then
+                               cli_set audio_langs || audio_langs="$2"
+                               cli_set sub_langs || sub_langs="$2"
+                           fi
+                           shift "$n" ;;
             --audio-langs|--audio-lang)
-                           profile_str "$1" "${2:-}" && audio_langs="$2"; shift "$n" ;;
+                           cli_set audio_langs || { profile_str "$1" "${2:-}" && audio_langs="$2"; }
+                           shift "$n" ;;
             --sub-langs|--sub-lang)
-                           profile_str "$1" "${2:-}" && sub_langs="$2"; shift "$n" ;;
+                           cli_set sub_langs || { profile_str "$1" "${2:-}" && sub_langs="$2"; }
+                           shift "$n" ;;
             --copy-streams|--remux)  copy_streams=true; shift ;;
             --quality-check) quality_check=true; shift ;;
-            --min-ssim)    profile_ssim "$1" "${2:-}" && { quality_min_ssim="$2"; quality_check=true; }; shift "$n" ;;
+            --min-ssim)    cli_set min_ssim \
+                               || { profile_ssim "$1" "${2:-}" && { quality_min_ssim="$2"; quality_check=true; }; }
+                           shift "$n" ;;
             --ssim-samples)
-                           if profile_uint "$1" "${2:-}" && [[ "$2" -ge 1 ]]; then
+                           if cli_set ssim_samples; then :
+                           elif profile_uint "$1" "${2:-}" && [[ "$2" -ge 1 ]]; then
                                quality_samples="$2"; quality_check=true
                            elif [[ "${2:-}" =~ ^[0-9]+$ ]]; then
                                warn "Profile option $1 expects at least 1 — ignored"
@@ -283,7 +313,8 @@ apply_profile_tokens() {
             --verify)      verify_output=true; shift ;;
             --no-early-abort) early_abort=false; shift ;;
             --early-abort-threshold)
-                           if profile_uint "$1" "${2:-}" && [[ "$2" -ge 1 && "$2" -le 99 ]]; then
+                           if cli_set early_abort_threshold; then :
+                           elif profile_uint "$1" "${2:-}" && [[ "$2" -ge 1 && "$2" -le 99 ]]; then
                                early_abort_threshold="$2"
                            elif [[ "${2:-}" =~ ^[0-9]+$ ]]; then
                                warn "Profile option $1 expects 1-99 — ignored"
@@ -291,7 +322,9 @@ apply_profile_tokens() {
                            shift "$n" ;;
             --no-merge-subs) merge_subs=false; shift ;;
             --exclude)     profile_str "$1" "${2:-}" && exclude_patterns+=("$2"); shift "$n" ;;
-            --min-size)    profile_size "$1" "${2:-}" && min_size=$(parse_size "$2"); shift "$n" ;;
+            --min-size)    cli_set min_size \
+                               || { profile_size "$1" "${2:-}" && min_size=$(parse_size "$2"); }
+                           shift "$n" ;;
             --sort-by-size|--sort-by-date)
                            # Batch-level: only honored from the input root's profile
                            local _sort_opt="$1" _sort_dir="desc"
@@ -300,16 +333,22 @@ apply_profile_tokens() {
                            else
                                shift
                            fi
-                           if [[ "$_sort_opt" == "--sort-by-size" ]]; then
-                               sort_by_size="$_sort_dir"; sort_by_date=""
-                           else
-                               sort_by_date="$_sort_dir"; sort_by_size=""
+                           if ! cli_set sort; then
+                               if [[ "$_sort_opt" == "--sort-by-size" ]]; then
+                                   sort_by_size="$_sort_dir"; sort_by_date=""
+                               else
+                                   sort_by_date="$_sort_dir"; sort_by_size=""
+                               fi
                            fi ;;
-            --log)         profile_str "$1" "${2:-}" && log_file=$(profile_path "$2"); shift "$n" ;;
-            --skip-log)    skip_log_enabled=true
-                           skip_log_file="${CURRENT_PROFILE_DIR}/.convert-skip.list"; shift ;;
+            --log)         cli_set log \
+                               || { profile_str "$1" "${2:-}" && log_file=$(profile_path "$2"); }
+                           shift "$n" ;;
+            --skip-log)    cli_set skip_log || { skip_log_enabled=true
+                               skip_log_file="${CURRENT_PROFILE_DIR}/.convert-skip.list"; }
+                           shift ;;
             --skip-log=*)
-                           if [[ -n "${1#*=}" ]]; then
+                           if cli_set skip_log; then :
+                           elif [[ -n "${1#*=}" ]]; then
                                skip_log_enabled=true
                                skip_log_file=$(profile_path "${1#*=}")
                            else
@@ -1513,7 +1552,8 @@ PROFILES:
   directory), plus --exclude (appends to CLI patterns) and --min-size.
   --sort-by-size/--sort-by-date are honored from the FIRST input root's
   profile only (ordering is batch-global). Destructive and output flags
-  (--smart, --rm-*, -y, -o, ...) stay CLI-only.
+  (--smart, --rm-*, -y, -o, ...) stay CLI-only. Precedence: flags typed on
+  the command line win over the profile; the profile beats defaults.
   --no-profile                  Ignore all .convert-profile files
 
 SUBTITLES:
@@ -1569,20 +1609,24 @@ parse_args() {
             --max-res|--max-h|--max-height)
                 need_uint "$1" "${2:-}"
                 max_res="$2"
+                CLI_EXPLICIT[maxres]=1
                 shift 2
                 ;;
             --1080|--1080p)
                 max_res="1080"
+                CLI_EXPLICIT[maxres]=1
                 shift
                 ;;
             --720|--720p)
                 max_res="720"
+                CLI_EXPLICIT[maxres]=1
                 shift
                 ;;
             --sd|--fast)
                 svt_preset=10; svt_crf=32; svt_film_grain=0
                 speed_preset="fast"
                 svt_preset_explicit=false; svt_crf_explicit=false
+                CLI_EXPLICIT[speed]=1
                 shift
                 ;;
             --hq)
@@ -1590,30 +1634,36 @@ parse_args() {
                 speed_preset="hq"
                 svt_preset_explicit=false; svt_crf_explicit=false
                 [[ "$audio_mode" == "auto" ]] && audio_mode="copy"
+                CLI_EXPLICIT[speed]=1
                 shift
                 ;;
             --crf)
                 need_uint "$1" "${2:-}"
                 [[ "$2" -le 63 ]] || die "Option --crf expects 0-63, got: $2"
                 svt_crf="$2"; svt_crf_explicit=true
+                CLI_EXPLICIT[crf]=1
                 shift 2
                 ;;
             --preset)
                 need_uint "$1" "${2:-}"
                 [[ "$2" -le 13 ]] || die "Option --preset expects 0-13, got: $2"
                 svt_preset="$2"; svt_preset_explicit=true
+                CLI_EXPLICIT[preset]=1
                 shift 2
                 ;;
             --cartoon)
                 content_type="cartoon"
+                CLI_EXPLICIT[content]=1
                 shift
                 ;;
             --tv)
                 content_type="tv"
+                CLI_EXPLICIT[content]=1
                 shift
                 ;;
             --movie)
                 content_type="movie"
+                CLI_EXPLICIT[content]=1
                 shift
                 ;;
             --quality-check)
@@ -1628,6 +1678,7 @@ parse_args() {
                 need_ssim "$1" "${2:-}"
                 quality_check=true
                 quality_min_ssim="$2"
+                CLI_EXPLICIT[min_ssim]=1
                 shift 2
                 ;;
             --ssim-samples)
@@ -1635,6 +1686,7 @@ parse_args() {
                 [[ "$2" -ge 1 ]] || die "Option --ssim-samples expects at least 1, got: $2"
                 quality_check=true
                 quality_samples="$2"
+                CLI_EXPLICIT[ssim_samples]=1
                 shift 2
                 ;;
             -y|--overwrite)
@@ -1650,6 +1702,7 @@ parse_args() {
                     shift
                 fi
                 sort_by_date=""
+                CLI_EXPLICIT[sort]=1
                 ;;
             --sort-by-date)
                 if [[ "${2:-}" == "asc" || "${2:-}" == "desc" ]]; then
@@ -1660,6 +1713,7 @@ parse_args() {
                     shift
                 fi
                 sort_by_size=""
+                CLI_EXPLICIT[sort]=1
                 ;;
             --dry-run)
                 dry_run=true
@@ -1672,6 +1726,7 @@ parse_args() {
             --min-size)
                 need_arg "$1" "${2:-}"
                 min_size=$(parse_size "$2")
+                CLI_EXPLICIT[min_size]=1
                 shift 2
                 ;;
             --exclude)
@@ -1681,11 +1736,13 @@ parse_args() {
                 ;;
             --skip-log)
                 skip_log_enabled=true
+                CLI_EXPLICIT[skip_log]=1
                 shift
                 ;;
             --skip-log=*)
                 skip_log_enabled=true
                 skip_log_file="${1#*=}"
+                CLI_EXPLICIT[skip_log]=1
                 shift
                 ;;
             --after)
@@ -1702,24 +1759,30 @@ parse_args() {
                 [[ "$2" -ge 1 && "$2" -le 99 ]] \
                     || die "Option --early-abort-threshold expects 1-99, got: $2"
                 early_abort_threshold="$2"
+                CLI_EXPLICIT[early_abort_threshold]=1
                 shift 2
                 ;;
             --copy-audio)
                 audio_mode="copy"
+                CLI_EXPLICIT[audio_mode]=1
                 shift
                 ;;
             --opus)
                 audio_mode="opus"
+                CLI_EXPLICIT[audio_mode]=1
                 shift
                 ;;
             --auto-audio)
                 audio_mode="auto"
+                CLI_EXPLICIT[audio_mode]=1
                 shift
                 ;;
             --audio-threshold)
                 need_uint "$1" "${2:-}"
                 audio_bitrate_threshold="$2"
                 audio_mode="auto"
+                CLI_EXPLICIT[audio_threshold]=1
+                CLI_EXPLICIT[audio_mode]=1
                 shift 2
                 ;;
             --no-merge-subs)
@@ -1731,20 +1794,25 @@ parse_args() {
                 # Both audio and subs, unless a more specific flag already set one
                 [[ -z "$audio_langs" ]] && audio_langs="$2"
                 [[ -z "$sub_langs" ]] && sub_langs="$2"
+                CLI_EXPLICIT[audio_langs]=1
+                CLI_EXPLICIT[sub_langs]=1
                 shift 2
                 ;;
             --audio-langs|--audio-lang)
                 need_arg "$1" "${2:-}"
                 audio_langs="$2"
+                CLI_EXPLICIT[audio_langs]=1
                 shift 2
                 ;;
             --sub-langs|--sub-lang)
                 need_arg "$1" "${2:-}"
                 sub_langs="$2"
+                CLI_EXPLICIT[sub_langs]=1
                 shift 2
                 ;;
             --copy-streams|--remux)
                 copy_streams=true
+                CLI_EXPLICIT[copy_streams]=1
                 shift
                 ;;
             --no-profile)
@@ -1754,6 +1822,7 @@ parse_args() {
             -l|--log)
                 need_arg "$1" "${2:-}"
                 log_file="$2"
+                CLI_EXPLICIT[log]=1
                 shift 2
                 ;;
             --stats)

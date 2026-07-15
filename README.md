@@ -245,7 +245,7 @@ Drop a `.convert-profile` file into a directory (or any parent) and its flags ar
 - Relative `--log`/`--skip-log` paths anchor to the profile's directory — `--log av1-convert.log` in a series folder keeps one log per series regardless of where the batch was launched; a bare `--skip-log` uses `.convert-skip.list` next to the profile.
 - Filtering and ordering work too: `--exclude` (appends to the CLI patterns — folder-specific junk stays out) and `--min-size` apply per file; `--sort-by-size`/`--sort-by-date` are honored from the **first input root's** profile only, since ordering is batch-global.
 - Everything else is ignored with a warning — a bad profile never kills a batch. Deliberately CLI-only: destructive/batch policy (`--smart`, `--rm-if-bigger`, `--rm-source`, `-y` — a dotfile must never delete files) and output/session flags (`-o`, `--in-place`, `--after`, `-r`, …).
-- Profile flags override the CLI base for that file.
+- Precedence: a flag explicitly typed on the command line always wins over the profile; the profile overrides built-in defaults only. (`--exclude` is the exception: CLI and profile patterns combine.)
 
 ```bash
 # /mnt/videos/Movies/Die Hard (1988)/.convert-profile

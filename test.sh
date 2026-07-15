@@ -711,6 +711,67 @@ test_no_profile_flag() {
 }
 test_no_profile_flag
 
+# A relative --log in a profile must land next to the .convert-profile,
+# not in the CWD, and open with the session banner.
+test_profile_log_relative() {
+    local dir="$TEST_DIR/profile-log"
+    mkdir -p "$dir"
+    printf '%s\n' '--log av1.log' > "$dir/.convert-profile"
+    generate_video "$dir/ep.mp4" 2
+
+    (cd "$TEST_DIR" && "$CONVERT" --no-progress --fast "$dir/ep.mp4" >/dev/null 2>&1) && rc=0 || rc=$?
+
+    if [[ $rc -eq 0 ]] && [[ -f "$dir/av1.log" ]] \
+        && grep -q "session" "$dir/av1.log" && grep -q "OK" "$dir/av1.log"; then
+        pass "profile --log writes next to the profile, with session banner"
+    else
+        fail "profile --log" "exit $rc, log missing or incomplete in $dir"
+    fi
+}
+test_profile_log_relative
+
+# A profile-activated skip list (unknown at collection time) must still skip
+# the file, via the convert-time re-check.
+test_profile_skip_log() {
+    local dir="$TEST_DIR/profile-skip"
+    mkdir -p "$dir"
+    printf '%s\n' '--skip-log' > "$dir/.convert-profile"
+    generate_video "$dir/v.mp4" 2
+    local sz
+    sz=$(stat -c %s "$dir/v.mp4")
+    printf '%s\tv.mp4\t?\ttest-seeded\n' "$sz" > "$dir/.convert-skip.list"
+
+    local output
+    output=$("$CONVERT" --no-progress --fast "$dir/v.mp4" 2>&1) && rc=0 || rc=$?
+
+    if [[ $rc -eq 0 ]] && [[ ! -f "$dir/v.mkv" ]] && echo "$output" | grep -qi "skip-log"; then
+        pass "profile --skip-log skips a listed file at convert time"
+    else
+        fail "profile skip-log" "exit $rc, output produced or no skip message"
+    fi
+}
+test_profile_skip_log
+
+# A broken profile line must warn and be ignored, never kill the batch.
+test_profile_bad_values() {
+    local dir="$TEST_DIR/profile-bad"
+    mkdir -p "$dir"
+    printf '%s\n' '--min-ssim garbage' '--rm-source' > "$dir/.convert-profile"
+    generate_video "$dir/ep.mp4" 2
+
+    local output
+    output=$("$CONVERT" --no-progress --fast "$dir/ep.mp4" 2>&1) && rc=0 || rc=$?
+
+    if [[ $rc -eq 0 ]] && [[ -f "$dir/ep.mkv" ]] && [[ -f "$dir/ep.mp4" ]] \
+        && echo "$output" | grep -q "between 0 and 1" \
+        && echo "$output" | grep -q "unsupported profile option"; then
+        pass "bad profile values warn + are ignored (batch survives)"
+    else
+        fail "profile bad values" "exit $rc, missing warn or output (source deleted?)"
+    fi
+}
+test_profile_bad_values
+
 # --- Skip log ---
 
 section "Skip log"
@@ -1210,6 +1271,23 @@ test_stats_summary() {
     fi
 }
 test_stats_summary
+
+# Live mode never exits on its own — timeout(1) is the harness here (rc 124).
+test_stats_live() {
+    local dir="$TEST_DIR/stats-live"
+    mkdir -p "$dir"
+    printf '2026-01-01T00:00:00\tOK      \tin=10M\tout=5M\tsaved=50%%\ttook=00:01:00\t\t/x/v.mp4\n' \
+        > "$dir/log.tsv"
+
+    local output rc
+    output=$(timeout 3 "$CONVERT" --stats-live "$dir/log.tsv" 2>&1); rc=$?
+    if [[ $rc -eq 124 ]] && echo "$output" | grep -q "OK         1"; then
+        pass "--stats-live follows a --log file (killed by timeout)"
+    else
+        fail "--stats-live" "rc=$rc (expected 124) or stats missing"
+    fi
+}
+test_stats_live
 
 # --- HDR preservation ---
 

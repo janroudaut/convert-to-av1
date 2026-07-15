@@ -57,7 +57,8 @@ ffmpeg (with libsvtav1), ffprobe, python3, awk, bc, numfmt, stat, mktemp
   before the atomic mv; forced automatically on outputs below `min_size`
   (near-free at that size, and the size tripwire alone cannot tell a legit
   tiny clip from garbage). `--stats FILE` (print_log_stats) is a standalone
-  mode like `--check`. Disk-space guard: skip when df free < input size
+  mode like `--check`; `--stats-live` wraps it in a mtime-poll redraw loop
+  (print_log_stats_live, `trap 'exit 0' INT` so Ctrl-C leaves silently). Disk-space guard: skip when df free < input size
   (unknown free space never blocks)
 - The per-track opus/copy decision lives in ONE place: `audio_stream_action`
   (used by both `stream_dispositions` and `build_ffmpeg_cmd`, so display ==
@@ -134,14 +135,24 @@ ffmpeg (with libsvtav1), ffprobe, python3, awk, bc, numfmt, stat, mktemp
   skips them on later runs (filtered in `collect_and_sort_files`). Default file
   `.convert-skip.list` at the input root; paths stored **relative to the log dir**
   (`skip_key`, portable) with the source size as a safety net (changed file =
-  retried). Line format: `size\trelpath\tsource-mtime\treason`
+  retried). Line format: `size\trelpath\tsource-mtime\treason`. Profiles can
+  activate their own list mid-batch, so `SKIP_LOG_SIZES` keys are namespaced
+  `abs-list-path\tentry` (`activate_skip_log`: idempotent per list, re-pointed
+  per file from `resolve_file_profile`); profile lists are enforced by a second
+  `is_skip_logged` check in `convert_file` — collection-time filtering only ever
+  sees the CLI list
 - Per-directory `.convert-profile`: encoding/quality/audio/track flags applied
   per file by walking up from its dir (`resolve_file_profile`). CLI config is
   snapshotted (`snapshot_base_config`/`BASE_CFG`) and restored per file so
   profiles don't leak between directories. `--no-profile` disables. Auto content
   detection was tried and rejected — grain confounds with detail AND motion
   (Die Hard 1988 scored like clean digital), so profiles are the deliberate,
-  reliable alternative
+  reliable alternative. Also allowed: quality-check/verify/early-abort flags and
+  `--log`/`--skip-log` (relative paths anchor to the profile's dir via
+  `profile_path`; the session banner is written lazily per log file,
+  `LOG_HEADER_WRITTEN`). Destructive/batch/collection flags are deliberately
+  NOT accepted — a dotfile must never delete files, and collection-phase
+  filters run before profiles resolve
 
 ## Code Style
 - All code, comments, CLI output, and docs must be in English

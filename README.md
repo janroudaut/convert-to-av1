@@ -240,7 +240,9 @@ Drop a `.convert-profile` file into a directory (or any parent) and its flags ar
 
 - Resolved **per file**: the tool walks up from each file's directory and uses the first `.convert-profile` it finds.
 - One flag per line or space-separated; `#` starts a comment.
-- Supported flags: presets (`--fast`/`--sd`, `--hq`, `--cartoon`, `--tv`, `--movie`), encoding (`--crf`, `--preset`), resolution (`--max-res`, `--1080`, `--720`), audio (`--copy-audio`, `--opus`, `--auto-audio`, `--audio-threshold`), track selection (`--langs`, `--audio-langs`, `--sub-langs`) and `--copy-streams`/`--remux`. Anything else (batch/output flags like `-o`, `-r`, `--smart`) is ignored with a warning — a bad profile never kills a batch.
+- Supported flags: presets (`--fast`/`--sd`, `--hq`, `--cartoon`, `--tv`, `--movie`), encoding (`--crf`, `--preset`), resolution (`--max-res`, `--1080`, `--720`), audio (`--copy-audio`, `--opus`, `--auto-audio`, `--audio-threshold`), track selection (`--langs`, `--audio-langs`, `--sub-langs`), quality (`--quality-check`, `--min-ssim`, `--ssim-samples`, `--verify`), early abort (`--no-early-abort`, `--early-abort-threshold`), `--no-merge-subs`, `--copy-streams`/`--remux`, and logging (`--log FILE`, `--skip-log[=FILE]`).
+- Relative `--log`/`--skip-log` paths anchor to the profile's directory — `--log av1-convert.log` in a series folder keeps one log per series regardless of where the batch was launched; a bare `--skip-log` uses `.convert-skip.list` next to the profile.
+- Everything else is ignored with a warning — a bad profile never kills a batch. Deliberately CLI-only: destructive/batch policy (`--smart`, `--rm-if-bigger`, `--rm-source`, `-y` — a dotfile must never delete files), collection filters (`--exclude`, `--min-size`, `-r`, `--sort-by-size`) and output/session flags (`-o`, `--in-place`, `--after`, …).
 - Profile flags override the CLI base for that file.
 
 ```bash
@@ -271,6 +273,7 @@ Adjacent `.txt` files are embedded as MKV `description` metadata but are **never
 |------|-------------|
 | `-l, --log FILE` | Append a synthetic, greppable per-file TSV log to FILE (time, status, sizes, saved %, wall time, note) |
 | `--stats FILE` | Summarise a `--log` file and exit: per-status counts, converted totals, encode time/throughput, SSIM min/avg |
+| `--stats-live FILE` | Same report in follow mode: redraws whenever the log grows (watch a running batch; `Ctrl-C` to quit) |
 | `-v, --verbose` | Verbose output |
 | `--no-progress` | Disable progress bar |
 
@@ -391,6 +394,8 @@ convert-to-av1 v3.4.0 — stats for convert.log
   encode time ....... 37h12m total, avg 53m/file, 2.4 MB/s
   ssim .............. min 0.9231, avg 0.9612 (42 checked)
 ```
+
+`--stats-live` (alias `--live-stats`) is the same report in follow mode: it watches the log and redraws whenever a batch appends to it — run it in a second terminal to monitor a conversion in progress (`Ctrl-C` to quit; it also waits patiently if the log doesn't exist yet).
 
 ## Supported formats
 

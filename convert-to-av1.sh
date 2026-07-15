@@ -101,13 +101,18 @@ LAST_SSIM=""              # SSIM score of the last successful quality check
 # Collision guard: final output path -> first source that claimed it
 declare -A CLAIMED_OUTPUTS=()
 
-# Quality-failure skip log: abspath -> recorded source size (bytes)
+# Quality-failure skip log: "abs-list-path \t entry-key" -> source size (bytes).
+# Keys are namespaced by list file: profiles can activate several lists per run.
 declare -A SKIP_LOG_SIZES=()
+
+# --log files that already got their session banner (profiles may add logs mid-batch)
+declare -A LOG_HEADER_WRITTEN=()
 
 # -- Per-directory profile state -----------------------------------------------
 # Base (CLI) encoding config, snapshotted so per-file profiles start clean.
 declare -A BASE_CFG=()
 CURRENT_PROFILE_FILE=""   # path of the .convert-profile applied to current file
+CURRENT_PROFILE_DIR=""    # its directory — anchors relative --log/--skip-log paths
 CURRENT_PROFILE_TOKENS="" # its raw tokens, for display
 
 # ==============================================================================
@@ -161,7 +166,10 @@ build_svtav1_options() {
 PROFILE_VARS=(svt_preset svt_crf svt_preset_explicit svt_crf_explicit
     svt_film_grain svt_film_grain_denoise svt_tune
     svt_pix_fmt svt_enable_overlays svt_scd content_type speed_preset max_res
-    audio_mode audio_bitrate_threshold audio_langs sub_langs copy_streams)
+    audio_mode audio_bitrate_threshold audio_langs sub_langs copy_streams
+    quality_check quality_min_ssim quality_samples verify_output
+    early_abort early_abort_threshold merge_subs
+    log_file skip_log_enabled skip_log_file)
 
 snapshot_base_config() {
     local v
@@ -202,6 +210,19 @@ profile_str() {
     warn "Profile option $1 needs a value — ignored"
     return 1
 }
+profile_ssim() {
+    [[ "${2:-}" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] && return 0
+    warn "Profile option $1 expects a value between 0 and 1, got: ${2:-<missing>} — ignored"
+    return 1
+}
+
+# Relative --log/--skip-log values in a profile anchor to the profile's dir
+profile_path() {
+    case "$1" in
+        /*) echo "$1" ;;
+        *)  echo "${CURRENT_PROFILE_DIR}/$1" ;;
+    esac
+}
 
 # Profile-safe subset of parse_args. Value-taking options consume 2 tokens
 # when the value is present, 1 otherwise.
@@ -236,6 +257,36 @@ apply_profile_tokens() {
             --sub-langs|--sub-lang)
                            profile_str "$1" "${2:-}" && sub_langs="$2"; shift "$n" ;;
             --copy-streams|--remux)  copy_streams=true; shift ;;
+            --quality-check) quality_check=true; shift ;;
+            --min-ssim)    profile_ssim "$1" "${2:-}" && { quality_min_ssim="$2"; quality_check=true; }; shift "$n" ;;
+            --ssim-samples)
+                           if profile_uint "$1" "${2:-}" && [[ "$2" -ge 1 ]]; then
+                               quality_samples="$2"; quality_check=true
+                           elif [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+                               warn "Profile option $1 expects at least 1 — ignored"
+                           fi
+                           shift "$n" ;;
+            --verify)      verify_output=true; shift ;;
+            --no-early-abort) early_abort=false; shift ;;
+            --early-abort-threshold)
+                           if profile_uint "$1" "${2:-}" && [[ "$2" -ge 1 && "$2" -le 99 ]]; then
+                               early_abort_threshold="$2"
+                           elif [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+                               warn "Profile option $1 expects 1-99 — ignored"
+                           fi
+                           shift "$n" ;;
+            --no-merge-subs) merge_subs=false; shift ;;
+            --log)         profile_str "$1" "${2:-}" && log_file=$(profile_path "$2"); shift "$n" ;;
+            --skip-log)    skip_log_enabled=true
+                           skip_log_file="${CURRENT_PROFILE_DIR}/.convert-skip.list"; shift ;;
+            --skip-log=*)
+                           if [[ -n "${1#*=}" ]]; then
+                               skip_log_enabled=true
+                               skip_log_file=$(profile_path "${1#*=}")
+                           else
+                               warn "Profile option --skip-log= needs a value — ignored"
+                           fi
+                           shift ;;
             "")            shift ;;
             *)             warn "Ignoring unsupported profile option: $1"; shift ;;
         esac
@@ -247,6 +298,7 @@ resolve_file_profile() {
     local input_file="$1"
     restore_base_config
     CURRENT_PROFILE_FILE=""
+    CURRENT_PROFILE_DIR=""
     CURRENT_PROFILE_TOKENS=""
 
     if $use_profiles; then
@@ -263,6 +315,7 @@ resolve_file_profile() {
                 toks+=("${lt[@]}")
             done < "$pf"
             CURRENT_PROFILE_FILE="$pf"
+            CURRENT_PROFILE_DIR=$(dirname "$pf")
             CURRENT_PROFILE_TOKENS="${toks[*]-}"
             apply_profile_tokens "${toks[@]+"${toks[@]}"}"
         fi
@@ -270,6 +323,8 @@ resolve_file_profile() {
 
     apply_content_type
     build_svtav1_options
+    # Re-point (and lazily load) the skip list — a profile may have switched it
+    activate_skip_log
 }
 
 # ==============================================================================
@@ -375,6 +430,7 @@ is_excluded() {
 # One synthetic TSV line per file in --log — never raw ffmpeg output
 write_log_line() {
     local file="$1" status="$2" in_sz="${3:-0}" out_sz="${4:-0}" note="${5:-}"
+    write_log_session_header   # no-op once written; profiles add logs mid-batch
     local ts saved="-" out_disp="-" took="-"
     ts=$(date -Iseconds)
     [[ "$out_sz" -gt 0 ]] && out_disp=$(human_size "$out_sz")
@@ -393,6 +449,8 @@ write_log_line() {
 # Per-session "# ..." banner in --log, written before the first encode.
 # Must stay tab-free: print_log_stats skips comment lines via its NF filter.
 write_log_session_header() {
+    [[ -n "${LOG_HEADER_WRITTEN[$log_file]:-}" ]] && return 0
+    LOG_HEADER_WRITTEN["$log_file"]=1
     local enc audio
     if $copy_streams; then
         enc="remux only (no re-encode)"
@@ -507,6 +565,27 @@ print_log_stats() {
     ' "$f"
 }
 
+# Follow the log (tail -f style): redraw the stats whenever it changes.
+# The file may not exist yet — the batch writing it may not have started.
+print_log_stats_live() {
+    local f="$1" last="" cur
+    trap 'exit 0' INT   # Ctrl-C is the normal way out — leave silently
+    while :; do
+        cur=$(stat -c '%s %Y' "$f" 2>/dev/null || echo "absent")
+        if [[ "$cur" != "$last" ]]; then
+            last="$cur"
+            [[ -t 1 ]] && printf '\033[H\033[2J'
+            if [[ -f "$f" ]]; then
+                print_log_stats "$f"
+            else
+                echo "Waiting for log file: $f"
+            fi
+            [[ -t 1 ]] && printf '\n  (live — Ctrl-C to quit)\n'
+        fi
+        sleep 2
+    done
+}
+
 add_result() {
     local file="$1" status="$2" input_sz="${3:-0}" output_sz="${4:-0}" note="${5:-}"
     SUMMARY_FILES+=("$file")
@@ -587,6 +666,8 @@ lang_matches() {
 # recorded source size means a changed file is retried.
 
 SKIP_LOG_DIR=""
+SKIP_LOG_ABS=""                # abspath of the active list — namespaces cache keys
+declare -A SKIP_LOGS_LOADED=()
 
 # Absolute path without resolving symlinks (realpath may be absent)
 abspath() {
@@ -611,14 +692,20 @@ skip_key() {
     fi
 }
 
-load_skip_log() {
+# Point the helpers at $skip_log_file and load it once per distinct list —
+# profiles can switch lists mid-batch, so this runs per file (cheap after load)
+activate_skip_log() {
+    $skip_log_enabled || return 0
+    SKIP_LOG_ABS=$(abspath "$skip_log_file")
     SKIP_LOG_DIR=$(abspath "$(dirname "$skip_log_file")")
+    [[ -n "${SKIP_LOGS_LOADED[$SKIP_LOG_ABS]:-}" ]] && return 0
+    SKIP_LOGS_LOADED["$SKIP_LOG_ABS"]=1
     [[ -f "$skip_log_file" ]] || return 0
     local size path
     while IFS=$'\t' read -r size path _; do
         [[ -z "$path" || "$size" == \#* ]] && continue
         [[ "$size" =~ ^[0-9]+$ ]] || continue
-        SKIP_LOG_SIZES["$path"]="$size"
+        SKIP_LOG_SIZES["${SKIP_LOG_ABS}"$'\t'"$path"]="$size"
     done < "$skip_log_file"
 }
 
@@ -626,7 +713,7 @@ load_skip_log() {
 is_skip_logged() {
     $skip_log_enabled || return 1
     local key rec
-    key=$(skip_key "$1")
+    key="${SKIP_LOG_ABS}"$'\t'"$(skip_key "$1")"
     rec="${SKIP_LOG_SIZES[$key]:-}"
     [[ -n "$rec" ]] || return 1
     [[ "$(get_file_size "$1")" == "$rec" ]]
@@ -637,14 +724,15 @@ is_skip_logged() {
 append_skip_log() {
     $skip_log_enabled || return 0
     local file="$1" size="$2" reason="$3"
-    local key
-    key=$(skip_key "$file")
+    local key rel
+    rel=$(skip_key "$file")
+    key="${SKIP_LOG_ABS}"$'\t'"$rel"
     [[ "${SKIP_LOG_SIZES[$key]:-}" == "$size" ]] && return 0   # already recorded
     SKIP_LOG_SIZES["$key"]="$size"
     local mt src_mtime="?"
     mt=$(stat -c %Y "$file" 2>/dev/null)
     [[ -n "$mt" ]] && src_mtime=$(date -d "@$mt" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo "?")
-    printf '%s\t%s\t%s\t%s\n' "$size" "$key" "$src_mtime" "$reason" \
+    printf '%s\t%s\t%s\t%s\n' "$size" "$rel" "$src_mtime" "$reason" \
         >> "$skip_log_file" 2>/dev/null || warn "Could not write skip-log: $skip_log_file"
 }
 
@@ -1386,7 +1474,10 @@ PROFILES:
   A '.convert-profile' file in a directory (or any parent) applies its flags
   to files under it — e.g. put '--movie' in a grainy-films folder, '--cartoon'
   in an animation folder. Resolved per file; one flag per line or space-separated;
-  '#' starts a comment. Supports encoding/quality/audio/track flags.
+  '#' starts a comment. Supports encoding/quality/audio/track flags plus
+  --quality-check/--min-ssim/--ssim-samples, --verify, early-abort tuning,
+  --no-merge-subs, --log and --skip-log (relative paths anchor to the profile's
+  directory). Batch, output and destructive flags are CLI-only.
   --no-profile                  Ignore all .convert-profile files
 
 SUBTITLES:
@@ -1396,6 +1487,8 @@ LOGGING:
   -l, --log FILE                Append a synthetic, greppable per-file log to FILE
                                 (tab-separated: time, status, sizes, saved%, took, note)
   --stats FILE                  Summarise a --log file (counts, totals, SSIM) and exit
+  --stats-live FILE             Same, but follow the log and refresh on change
+                                (watch a running batch; Ctrl-C to quit)
   -v, --verbose                 Verbose output
   --no-progress                 Disable progress bar
 
@@ -1619,6 +1712,11 @@ parse_args() {
             --stats)
                 need_arg "$1" "${2:-}"
                 print_log_stats "$2"
+                exit 0
+                ;;
+            --stats-live|--live-stats)
+                need_arg "$1" "${2:-}"
+                print_log_stats_live "$2"
                 exit 0
                 ;;
             -v|--verbose)
@@ -2273,6 +2371,14 @@ convert_file() {
     # Profile resolution comes before the AV1 skip: a profile may enable
     # --copy-streams, and remux mode must still clean already-AV1 files
     resolve_file_profile "$input_file"
+
+    # Re-check after profile resolution: a profile-activated skip list is not
+    # known at collection time (CLI lists were already filtered there)
+    if is_skip_logged "$input_file"; then
+        info "  In skip-log (previously not worth converting), skipping: $input_file"
+        add_result "$input_file" "SKIPPED" "$input_size" 0 "in skip-log"
+        return 0
+    fi
 
     if ! $copy_streams && is_av1 "$input_file"; then
         info "  Already AV1, skipping: $input_file"
@@ -2958,7 +3064,7 @@ main() {
     apply_content_type
     build_svtav1_options
     check_dependencies
-    $skip_log_enabled && load_skip_log
+    activate_skip_log
 
     print_banner
 

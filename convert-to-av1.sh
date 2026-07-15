@@ -52,6 +52,7 @@ log_file=""
 verbose=false
 dry_run=false
 sort_by_size=""
+sort_by_date=""  # mutually exclusive with sort_by_size (last one wins)
 no_progress=false
 early_abort=true
 early_abort_threshold=15  # % of progress; early content compresses atypically, estimates firm up past ~10%
@@ -169,13 +170,19 @@ PROFILE_VARS=(svt_preset svt_crf svt_preset_explicit svt_crf_explicit
     audio_mode audio_bitrate_threshold audio_langs sub_langs copy_streams
     quality_check quality_min_ssim quality_samples verify_output
     early_abort early_abort_threshold merge_subs
-    log_file skip_log_enabled skip_log_file)
+    log_file skip_log_enabled skip_log_file
+    min_size sort_by_size sort_by_date)
+
+# exclude_patterns is an array — snapshotted apart (printf -v can't restore it);
+# profile --exclude APPENDS to the CLI patterns instead of replacing them
+BASE_EXCLUDES=()
 
 snapshot_base_config() {
     local v
     for v in "${PROFILE_VARS[@]}"; do
         BASE_CFG["$v"]="${!v}"
     done
+    BASE_EXCLUDES=("${exclude_patterns[@]+"${exclude_patterns[@]}"}")
 }
 
 restore_base_config() {
@@ -183,6 +190,7 @@ restore_base_config() {
     for v in "${PROFILE_VARS[@]}"; do
         printf -v "$v" '%s' "${BASE_CFG[$v]}"
     done
+    exclude_patterns=("${BASE_EXCLUDES[@]+"${BASE_EXCLUDES[@]}"}")
 }
 
 find_profile_file() {
@@ -213,6 +221,12 @@ profile_str() {
 profile_ssim() {
     [[ "${2:-}" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] && return 0
     warn "Profile option $1 expects a value between 0 and 1, got: ${2:-<missing>} — ignored"
+    return 1
+}
+# Must reject everything parse_size dies on — a profile can't afford the die
+profile_size() {
+    [[ "${2:-}" =~ ^[0-9]+(\.[0-9]+)?([KkMmGgTt]([Ii]?[Bb])?|[Bb])?$ ]] && return 0
+    warn "Profile option $1 expects a size (e.g. 500K, 1.5G), got: ${2:-<missing>} — ignored"
     return 1
 }
 
@@ -276,6 +290,21 @@ apply_profile_tokens() {
                            fi
                            shift "$n" ;;
             --no-merge-subs) merge_subs=false; shift ;;
+            --exclude)     profile_str "$1" "${2:-}" && exclude_patterns+=("$2"); shift "$n" ;;
+            --min-size)    profile_size "$1" "${2:-}" && min_size=$(parse_size "$2"); shift "$n" ;;
+            --sort-by-size|--sort-by-date)
+                           # Batch-level: only honored from the input root's profile
+                           local _sort_opt="$1" _sort_dir="desc"
+                           if [[ "${2:-}" == "asc" || "${2:-}" == "desc" ]]; then
+                               _sort_dir="$2"; shift 2
+                           else
+                               shift
+                           fi
+                           if [[ "$_sort_opt" == "--sort-by-size" ]]; then
+                               sort_by_size="$_sort_dir"; sort_by_date=""
+                           else
+                               sort_by_date="$_sort_dir"; sort_by_size=""
+                           fi ;;
             --log)         profile_str "$1" "${2:-}" && log_file=$(profile_path "$2"); shift "$n" ;;
             --skip-log)    skip_log_enabled=true
                            skip_log_file="${CURRENT_PROFILE_DIR}/.convert-skip.list"; shift ;;
@@ -1444,6 +1473,8 @@ QUALITY:
 
 BATCH:
   --sort-by-size [asc|desc]     Sort files by size before processing (default: desc)
+  --sort-by-date [asc|desc]     Sort files by mtime before processing (default:
+                                desc = newest first); mutually exclusive, last wins
   --dry-run                     Show what would be done without converting
   -r, --recursive               Recurse into subdirectories
   --min-size SIZE               Minimum plausible video size (default: 128K;
@@ -1479,7 +1510,10 @@ PROFILES:
   '#' starts a comment. Supports encoding/quality/audio/track flags plus
   --quality-check/--min-ssim/--ssim-samples, --verify, early-abort tuning,
   --no-merge-subs, --log and --skip-log (relative paths anchor to the profile's
-  directory). Batch, output and destructive flags are CLI-only.
+  directory), plus --exclude (appends to CLI patterns) and --min-size.
+  --sort-by-size/--sort-by-date are honored from the FIRST input root's
+  profile only (ordering is batch-global). Destructive and output flags
+  (--smart, --rm-*, -y, -o, ...) stay CLI-only.
   --no-profile                  Ignore all .convert-profile files
 
 SUBTITLES:
@@ -1615,6 +1649,17 @@ parse_args() {
                     sort_by_size="desc"
                     shift
                 fi
+                sort_by_date=""
+                ;;
+            --sort-by-date)
+                if [[ "${2:-}" == "asc" || "${2:-}" == "desc" ]]; then
+                    sort_by_date="$2"
+                    shift 2
+                else
+                    sort_by_date="desc"
+                    shift
+                fi
+                sort_by_size=""
                 ;;
             --dry-run)
                 dry_run=true
@@ -1811,6 +1856,9 @@ collect_and_sort_files() {
     for f in "${collected[@]+"${collected[@]}"}"; do
         i=$((i + 1))
         (( i % 20 == 0 || i == total_c )) && scan_tick "checking… ${i}/${total_c}"
+        # Per-file profile BEFORE the filters: exclude/min-size/skip-log may
+        # come from the file's own .convert-profile
+        $use_profiles && resolve_file_profile "$f"
         if is_excluded "$f"; then
             debug "Excluded by pattern: $f"
             add_result "$f" "SKIPPED" 0 0 "excluded"
@@ -1835,23 +1883,34 @@ collect_and_sort_files() {
     scan_done
     collected=("${filtered[@]+"${filtered[@]}"}")
 
-    # Sort by size if requested
-    if [[ -n "$sort_by_size" && ${#collected[@]} -gt 0 ]]; then
-        local sort_flag="-n"
-        [[ "$sort_by_size" == "desc" ]] && sort_flag="-rn"
+    # Sorting is batch-level: the list is global, so per-file profiles cannot
+    # reorder it — only the CLI or the FIRST input root's profile decides
+    if $use_profiles && [[ ${#input_args[@]} -gt 0 ]]; then
+        local sort_root="${input_args[0]}"
+        [[ -d "$sort_root" ]] && sort_root="${sort_root%/}/."
+        resolve_file_profile "$sort_root"
+    fi
 
-        local sized_list=""
+    if [[ -n "$sort_by_size$sort_by_date" && ${#collected[@]} -gt 0 ]]; then
+        local sort_flag="-n"
+        [[ "$sort_by_size$sort_by_date" == "desc" ]] && sort_flag="-rn"
+
+        local keyed_list=""
         for f in "${collected[@]}"; do
-            local sz
-            sz=$(get_file_size "$f")
-            sized_list+="${sz} ${f}"$'\n'
+            local key
+            if [[ -n "$sort_by_size" ]]; then
+                key=$(get_file_size "$f")
+            else
+                key=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+            fi
+            keyed_list+="${key} ${f}"$'\n'
         done
 
         _result=()
         while IFS= read -r line; do
             [[ -z "$line" ]] && continue
             _result+=("${line#* }")
-        done < <(echo -n "$sized_list" | sort "$sort_flag")
+        done < <(echo -n "$keyed_list" | sort "$sort_flag")
     else
         _result=("${collected[@]}")
     fi
@@ -3043,7 +3102,8 @@ print_banner() {
     $merge_subs && banner_line "subtitles" "merge .srt/.vtt"
     $use_profiles && banner_line "profiles" ".convert-profile (per dir)"
 
-    [[ -n "$sort_by_size" ]] && banner_line "sort" "$sort_by_size"
+    [[ -n "$sort_by_size" ]] && banner_line "sort" "size $sort_by_size"
+    [[ -n "$sort_by_date" ]] && banner_line "sort" "date $sort_by_date"
     [[ "$min_size" -gt 0 ]] && banner_line "min size" "$(human_size "$min_size")"
     [[ ${#exclude_patterns[@]} -gt 0 ]] && banner_line "exclude" "${exclude_patterns[*]}"
     $skip_log_enabled && banner_line "skip-log" "$skip_log_file"

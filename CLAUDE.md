@@ -150,9 +150,12 @@ ffmpeg (with libsvtav1), ffprobe, python3, awk, bc, numfmt, stat, mktemp
   reliable alternative. Also allowed: quality-check/verify/early-abort flags and
   `--log`/`--skip-log` (relative paths anchor to the profile's dir via
   `profile_path`; the session banner is written lazily per log file,
-  `LOG_HEADER_WRITTEN`). Destructive/batch/collection flags are deliberately
-  NOT accepted — a dotfile must never delete files, and collection-phase
-  filters run before profiles resolve
+  `LOG_HEADER_WRITTEN`). `--exclude` (APPENDS to CLI patterns — array
+  snapshotted apart in `BASE_EXCLUDES`) and `--min-size` work per file: the
+  collection filter loop resolves each candidate's profile before testing.
+  `--sort-by-size`/`--sort-by-date` come from the FIRST input root's profile
+  only (ordering is batch-global). Destructive flags are deliberately NOT
+  accepted — a dotfile must never delete files
 
 ## Code Style
 - All code, comments, CLI output, and docs must be in English

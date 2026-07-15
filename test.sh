@@ -730,8 +730,8 @@ test_profile_log_relative() {
 }
 test_profile_log_relative
 
-# A profile-activated skip list (unknown at collection time) must still skip
-# the file, via the convert-time re-check.
+# A profile-activated skip list must filter the file out at collection time
+# (the per-candidate profile resolution loads it before the filters run).
 test_profile_skip_log() {
     local dir="$TEST_DIR/profile-skip"
     mkdir -p "$dir"
@@ -742,12 +742,12 @@ test_profile_skip_log() {
     printf '%s\tv.mp4\t?\ttest-seeded\n' "$sz" > "$dir/.convert-skip.list"
 
     local output
-    output=$("$CONVERT" --no-progress --fast "$dir/v.mp4" 2>&1) && rc=0 || rc=$?
+    output=$("$CONVERT" --no-progress --dry-run "$dir/v.mp4" 2>&1) && rc=0 || rc=$?
 
-    if [[ $rc -eq 0 ]] && [[ ! -f "$dir/v.mkv" ]] && echo "$output" | grep -qi "skip-log"; then
-        pass "profile --skip-log skips a listed file at convert time"
+    if [[ $rc -eq 0 ]] && [[ ! -f "$dir/v.mkv" ]] && ! echo "$output" | grep -q "DRYRUN"; then
+        pass "profile --skip-log filters a listed file out of the batch"
     else
-        fail "profile skip-log" "exit $rc, output produced or no skip message"
+        fail "profile skip-log" "exit $rc, file still queued or output produced"
     fi
 }
 test_profile_skip_log
@@ -771,6 +771,62 @@ test_profile_bad_values() {
     fi
 }
 test_profile_bad_values
+
+# --exclude in a profile appends to the CLI patterns and applies at collection.
+test_profile_exclude() {
+    local dir="$TEST_DIR/profile-exclude"
+    mkdir -p "$dir"
+    printf '%s\n' '--exclude *junk*' > "$dir/.convert-profile"
+    generate_video "$dir/junk-file.mp4" 2
+    generate_video "$dir/keeper.mp4" 2
+
+    "$CONVERT" --no-progress --fast "$dir" >/dev/null 2>&1 && rc=0 || rc=$?
+
+    if [[ $rc -eq 0 ]] && [[ ! -f "$dir/junk-file.mkv" ]] && [[ -f "$dir/keeper.mkv" ]]; then
+        pass "profile --exclude filters at collection time"
+    else
+        fail "profile --exclude" "exit $rc, junk converted or keeper missing"
+    fi
+}
+test_profile_exclude
+
+# --min-size in a profile overrides the CLI value (the wrapper's --min-size 0).
+test_profile_min_size() {
+    local dir="$TEST_DIR/profile-minsize"
+    mkdir -p "$dir"
+    printf '%s\n' '--min-size 500M' > "$dir/.convert-profile"
+    generate_video "$dir/small.mp4" 1 160x120
+
+    "$CONVERT" --no-progress --fast "$dir/small.mp4" >/dev/null 2>&1 && rc=0 || rc=$?
+
+    if [[ ! -f "$dir/small.mkv" ]]; then
+        pass "profile --min-size skips a too-small file"
+    else
+        fail "profile --min-size" "small file was converted despite profile threshold"
+    fi
+}
+test_profile_min_size
+
+# --sort-by-date from the input root's profile orders the batch (asc = oldest first).
+test_profile_sort_by_date() {
+    local dir="$TEST_DIR/profile-sort"
+    mkdir -p "$dir"
+    printf '%s\n' '--sort-by-date asc' > "$dir/.convert-profile"
+    generate_video "$dir/newer.mp4" 1
+    generate_video "$dir/older.mp4" 1
+    touch -d "2020-01-01" "$dir/older.mp4"
+    touch -d "2025-01-01" "$dir/newer.mp4"
+
+    local output first
+    output=$("$CONVERT" --no-progress --dry-run "$dir" 2>&1)
+    first=$(echo "$output" | grep -o "older\.mp4\|newer\.mp4" | head -1)
+    if [[ "$first" == "older.mp4" ]]; then
+        pass "root profile --sort-by-date asc processes oldest first"
+    else
+        fail "profile sort-by-date" "first file was '${first:-none}', expected older.mp4"
+    fi
+}
+test_profile_sort_by_date
 
 # --- Skip log ---
 

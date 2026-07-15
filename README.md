@@ -166,6 +166,7 @@ All presets use 10-bit encoding, enable-overlays, and scene-change detection. Fi
 |------|-------------|
 | `-r, --recursive` | Recurse into subdirectories |
 | `--sort-by-size [asc\|desc]` | Sort files by size before processing (default: desc) |
+| `--sort-by-date [asc\|desc]` | Sort files by mtime before processing (default: desc = newest first); mutually exclusive with `--sort-by-size`, last wins |
 | `--min-size SIZE` | Minimum plausible video size (default: `128K`; `0` disables). One threshold, three guards: smaller inputs are skipped, smaller outputs are decode-verified, and an output under `min(SIZE, input/10)` is flagged corrupt |
 | `--exclude PATTERN` | Exclude files matching glob pattern (repeatable) |
 | `--skip-log[=FILE]` | Record files not worth converting and skip them on re-runs |
@@ -242,7 +243,8 @@ Drop a `.convert-profile` file into a directory (or any parent) and its flags ar
 - One flag per line or space-separated; `#` starts a comment.
 - Supported flags: presets (`--fast`/`--sd`, `--hq`, `--cartoon`, `--tv`, `--movie`), encoding (`--crf`, `--preset`), resolution (`--max-res`, `--1080`, `--720`), audio (`--copy-audio`, `--opus`, `--auto-audio`, `--audio-threshold`), track selection (`--langs`, `--audio-langs`, `--sub-langs`), quality (`--quality-check`, `--min-ssim`, `--ssim-samples`, `--verify`), early abort (`--no-early-abort`, `--early-abort-threshold`), `--no-merge-subs`, `--copy-streams`/`--remux`, and logging (`--log FILE`, `--skip-log[=FILE]`).
 - Relative `--log`/`--skip-log` paths anchor to the profile's directory — `--log av1-convert.log` in a series folder keeps one log per series regardless of where the batch was launched; a bare `--skip-log` uses `.convert-skip.list` next to the profile.
-- Everything else is ignored with a warning — a bad profile never kills a batch. Deliberately CLI-only: destructive/batch policy (`--smart`, `--rm-if-bigger`, `--rm-source`, `-y` — a dotfile must never delete files), collection filters (`--exclude`, `--min-size`, `-r`, `--sort-by-size`) and output/session flags (`-o`, `--in-place`, `--after`, …).
+- Filtering and ordering work too: `--exclude` (appends to the CLI patterns — folder-specific junk stays out) and `--min-size` apply per file; `--sort-by-size`/`--sort-by-date` are honored from the **first input root's** profile only, since ordering is batch-global.
+- Everything else is ignored with a warning — a bad profile never kills a batch. Deliberately CLI-only: destructive/batch policy (`--smart`, `--rm-if-bigger`, `--rm-source`, `-y` — a dotfile must never delete files) and output/session flags (`-o`, `--in-place`, `--after`, `-r`, …).
 - Profile flags override the CLI base for that file.
 
 ```bash

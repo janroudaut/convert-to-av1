@@ -6,10 +6,10 @@ set -euo pipefail
 export LC_NUMERIC=C
 
 # ==============================================================================
-# convert-to-av1 v3.4.0 — Batch video conversion to AV1 (SVT-AV1 via ffmpeg)
+# convert-to-av1 v3.4.1 — Batch video conversion to AV1 (SVT-AV1 via ffmpeg)
 # ==============================================================================
 
-VERSION="3.4.0"
+VERSION="3.4.1"
 
 # -- Colors (respects the NO_COLOR convention) ---------------------------------
 if [[ -n "${NO_COLOR:-}" ]] || [[ ! -t 1 ]]; then

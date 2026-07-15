@@ -136,7 +136,12 @@ Two safety guards run before each conversion: an **existing output** is skipped 
 | `--movie` | Optimised for cinema (film-grain + denoise, lower CRF) |
 | `--crf N` | Set the CRF directly (0–63, lower = better quality) |
 | `--preset N` | Set the SVT-AV1 preset directly (0–13, lower = slower/better) |
+| `--quality-check` | Sampled SSIM comparison after each encode; the output is rejected below the threshold (part of `--smart`) |
+| `--min-ssim VALUE` | SSIM rejection threshold, 0–1 (default: 0.92) |
+| `--ssim-samples N` | Evenly-spaced sample points for the check (default: 5) |
 | `--verify` | Fully decode each output before accepting it (catches corrupt bitstreams; costs one extra decode). Outputs under `--min-size` are always verified — a decode that small is free, and it proves a suspiciously tiny file is real video, not garbage |
+
+**Reading SSIM scores — the scale is content-dependent.** SSIM saturates on flat, clean content: 2D animation routinely scores 0.99+ for a good encode, but even a visibly trashed one still lands around 0.985 — while grainy live-action film sits at 0.93–0.96 for the *same* perceived quality. Don't compare scores across content types, and don't read 0.99 as "extra headroom": the default 0.92 threshold is deliberately a catastrophe tripwire (corrupt stream, broken colorspace), not a fine-quality gate. For fine quality, trust the size-based guards and your eyes.
 
 **HDR is preserved:** HDR10 (`smpte2084`/PQ) and HLG sources are detected from the probe and their colour metadata (transfer, primaries, matrix) is carried through to the AV1 stream — an untagged HDR encode would play back washed-out. SDR sources with invalid or missing colour metadata still get the BT.709 fix SVT-AV1 requires.
 

@@ -117,7 +117,8 @@ declare -A BASE_CFG=()
 declare -A CLI_EXPLICIT=()
 CURRENT_PROFILE_FILE=""   # path of the .convert-profile applied to current file
 CURRENT_PROFILE_DIR=""    # its directory — anchors relative --log/--skip-log paths
-CURRENT_PROFILE_TOKENS="" # its raw tokens, for display
+CURRENT_PROFILE_TOKENS="" # its raw tokens, for the log note + root banner line
+CURRENT_PROFILE_PRESETS="" # preset tokens only (--cartoon, --hq, ...) — per-file header
 
 # ==============================================================================
 # SVT-AV1 preset helpers
@@ -368,6 +369,7 @@ resolve_file_profile() {
     CURRENT_PROFILE_FILE=""
     CURRENT_PROFILE_DIR=""
     CURRENT_PROFILE_TOKENS=""
+    CURRENT_PROFILE_PRESETS=""
 
     if $use_profiles; then
         local pf
@@ -404,6 +406,13 @@ resolve_file_profile() {
             CURRENT_PROFILE_FILE="$pf"
             CURRENT_PROFILE_DIR=$(dirname "$pf")
             CURRENT_PROFILE_TOKENS="${toks[*]-}"
+            local -a plabels=()
+            for tk in "${toks[@]+"${toks[@]}"}"; do
+                case "$tk" in
+                    --sd|--fast|--hq|--cartoon|--tv|--movie) plabels+=("$tk") ;;
+                esac
+            done
+            CURRENT_PROFILE_PRESETS="${plabels[*]-}"
             apply_profile_tokens "${toks[@]+"${toks[@]}"}"
         fi
     fi
@@ -2496,7 +2505,7 @@ print_file_header() {
     else
         src_disp="${GRAY}${input_dir_h}/${NC}${BOLD}${input_basename_h}${NC}"
     fi
-    [[ -n "$CURRENT_PROFILE_FILE" ]] && prof="  ${ORANGE}[${CURRENT_PROFILE_TOKENS}]${NC}"
+    [[ -n "$CURRENT_PROFILE_PRESETS" ]] && prof="  ${ORANGE}[${CURRENT_PROFILE_PRESETS}]${NC}"
     echo -e "${GREEN}▸${NC} ${ctr}${src_disp}   ${BOLD}${ORANGE}$(human_size "$input_size")${NC}${prof}"
 
     local sidecars=""
@@ -3175,7 +3184,10 @@ print_banner() {
     if $copy_streams; then
         banner_line "encoder" "remux only (no re-encode)" "$ORANGE"
     else
-        banner_line "encoder" "$(format_svtav1_options)"
+        local enc_label=""
+        [[ "$speed_preset" != "default" ]] && enc_label="$speed_preset"
+        [[ -n "$content_type" ]] && enc_label+="${enc_label:+, }${content_type}"
+        banner_line "encoder" "$(format_svtav1_options)${enc_label:+ (${enc_label})}"
         [[ -n "$content_type" ]] && banner_line "content" "$content_type"
     fi
 

@@ -2785,13 +2785,25 @@ compute_ssim_sampled() {
     local source="$1"
     local output="$2"
 
+    # ssim requires equal dimensions: when the output was downscaled
+    # (--max-res/--720/...), bring the source down to it and compare at the
+    # output resolution — otherwise the check silently returns N/A
+    local ssim_graph="[0:v:0][1:v:0]ssim"
+    local out_dims
+    out_dims=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
+        -of csv=s=x:p=0 "$output" 2>/dev/null | head -1)
+    if [[ "$out_dims" =~ ^([0-9]+)x([0-9]+)$ ]] \
+        && [[ "${BASH_REMATCH[2]}" != "$(get_video_height "$source")" ]]; then
+        ssim_graph="[0:v:0]scale=${BASH_REMATCH[1]}:${BASH_REMATCH[2]}:flags=bicubic[ref];[ref][1:v:0]ssim"
+    fi
+
     local dur
     dur=$(get_duration_secs "$source")
     if [[ "$dur" -lt 10 ]]; then
         # Short file: compare the whole thing
         local result
         result=$(ffmpeg -hide_banner -i "$source" -i "$output" \
-            -filter_complex "[0:v:0][1:v:0]ssim" -f null /dev/null 2>&1 \
+            -filter_complex "$ssim_graph" -f null /dev/null 2>&1 \
             | grep -oP 'All:\K[0-9.]+' | tail -1) || true
         echo "${result:-N/A}"
         return
@@ -2823,7 +2835,7 @@ compute_ssim_sampled() {
         ssim_val=$(ffmpeg -hide_banner \
             -ss "$pos" -t "$quality_sample_secs" -i "$source" \
             -ss "$pos" -t "$quality_sample_secs" -i "$output" \
-            -filter_complex "[0:v:0][1:v:0]ssim" -f null /dev/null 2>&1 \
+            -filter_complex "$ssim_graph" -f null /dev/null 2>&1 \
             | grep -oP 'All:\K[0-9.]+' | tail -1) || true
         if [[ -n "$ssim_val" && "$ssim_val" != "0" ]]; then
             total=$(echo "$total + $ssim_val" | bc -l)

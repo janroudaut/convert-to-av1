@@ -1371,6 +1371,26 @@ test_stats_summary() {
 }
 test_stats_summary
 
+# Downscaled output: ssim needs equal dims, the source must be scaled down
+# in the filter graph (used to silently return N/A).
+test_ssim_with_scaling() {
+    local dir="$TEST_DIR/ssim-scale"
+    mkdir -p "$dir"
+    generate_video "$dir/uhd.mp4" 12 1920x1080
+
+    local output
+    output=$("$CONVERT" --no-progress --fast --720 --quality-check --min-ssim 0.5 \
+        "$dir/uhd.mp4" 2>&1) && rc=0 || rc=$?
+
+    if [[ $rc -eq 0 ]] && echo "$output" | grep -q "SSIM: 0" \
+        && ! echo "$output" | grep -qi "could not compute"; then
+        pass "SSIM check works on downscaled output"
+    else
+        fail "ssim with scaling" "exit $rc, SSIM missing or N/A: $(echo "$output" | grep -i ssim | head -2)"
+    fi
+}
+test_ssim_with_scaling
+
 # Live mode never exits on its own — timeout(1) is the harness here (rc 124).
 test_stats_live() {
     local dir="$TEST_DIR/stats-live"

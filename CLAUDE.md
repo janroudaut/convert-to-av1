@@ -121,7 +121,10 @@ ffmpeg (with libsvtav1), ffprobe, python3, awk, bc, numfmt, stat, mktemp
   `need_ssim`, `parse_size` supports decimals like `1.5G` and dies on garbage)
 - SSIM quality check MUST use explicit `[0:v:0][1:v:0]ssim` pads — a bare `ssim`
   filter mis-selects streams and returns N/A when a cover/attached_pic second
-  video stream is present (silently disabling the check). SSIM is I/O-bound: ~1s
+  video stream is present (silently disabling the check). Same N/A trap when
+  the output was downscaled (`--max-res`): ssim requires equal dims, so the
+  source is scaled down to the output resolution in the filter graph (one
+  ffprobe of the temp output's WxH — not in the source probe cache). SSIM is I/O-bound: ~1s
   per 10s sample on ext4 vs 24–105s on WSL `/mnt` (drvfs seeks) — the phase is
   fast unless the files live on a slow mount
 - SSIM ffmpeg runs inside a command substitution (deep grandchild), so cleanup

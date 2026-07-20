@@ -945,6 +945,42 @@ test_exclude_pattern() {
 }
 test_exclude_pattern
 
+test_exclude_case_insensitive() {
+    local dir="$TEST_DIR/exclude-case"
+    mkdir -p "$dir"
+    generate_video "$dir/Mixed Case Movie.mp4" 1 160x120
+    generate_video "$dir/keep-me.mp4" 1 160x120
+
+    local output
+    output=$("$CONVERT" --no-progress --dry-run --ignore '*mixed case*' "$dir" 2>&1)
+
+    if echo "$output" | grep -q "keep-me" \
+        && ! echo "$output" | grep -q "Mixed Case Movie.*DRYRUN"; then
+        pass "--exclude/--ignore matches case-insensitively"
+    else
+        fail "--exclude case" "Mixed Case Movie not filtered: $(echo "$output" | tail -3)"
+    fi
+}
+test_exclude_case_insensitive
+
+test_exclude_codec() {
+    local dir="$TEST_DIR/exclude-codec"
+    mkdir -p "$dir"
+    generate_video "$dir/old-encode.mp4" 1 160x120      # libx264 → h264
+    generate_av1_video "$dir/keeper.mkv" 1               # av1 → not matched
+
+    local output
+    output=$("$CONVERT" --no-progress --dry-run --copy-streams --ignore codec:x264 "$dir" 2>&1)
+
+    if ! echo "$output" | grep -q "old-encode.*DRYRUN" \
+        && echo "$output" | grep -q "keeper.*DRYRUN"; then
+        pass "--exclude codec:NAME filters by video codec (x264 alias)"
+    else
+        fail "--exclude codec:" "h264 file not filtered: $(echo "$output" | tail -3)"
+    fi
+}
+test_exclude_codec
+
 # --- Recursive mode ---
 
 section "Recursive mode"

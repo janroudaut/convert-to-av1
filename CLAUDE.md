@@ -9,7 +9,7 @@ bash -n convert-to-av1.sh              # Syntax check
 shellcheck convert-to-av1.sh           # Lint (static analysis)
 bash convert-to-av1.sh --help           # Show usage
 bash convert-to-av1.sh --dry-run .      # Test run (no conversion)
-bash test.sh                            # Integration suite (55 tests, synthetic files)
+bash test.sh                            # Integration suite (67 tests, synthetic files)
                                         # (runs via a wrapper injecting --min-size 0:
                                         #  synthetic clips are below the 128K default)
 ```
@@ -50,11 +50,13 @@ ffmpeg (with libsvtav1), ffprobe, python3, awk, bc, numfmt, stat, mktemp
   colour metadata forwarded explicitly in build_ffmpeg_cmd — ffmpeg does not
   reliably tag libsvtav1 output, and untagged HDR plays back washed-out. The
   BT.709 fix only applies to SDR with invalid/missing metadata
-- `min_size` (128K default, `--min-size`, 0 disables) is the ONE "too small to
-  be real video" threshold: input filter, corrupt-output floor
-  (`min(min_size, input/10)`, hard floor 1K) and forced-verify trigger
+- `min_size` (128K default, `--min-size`, 0 disables) is ONLY the input filter
+  ("don't bother converting"). Output sanity is on the fixed `SANITY_SIZE`
+  (128K) constant: corrupt-output floor (`min(SANITY_SIZE, input/10)`, hard
+  floor 1K) and forced-verify trigger — raising/zeroing `--min-size` must
+  never loosen those guardrails (deliberate split, 2026-07-20)
 - `--verify` full-decodes the temp output (with `-xerror`) after SSIM and
-  before the atomic mv; forced automatically on outputs below `min_size`
+  before the atomic mv; forced automatically on outputs below `SANITY_SIZE`
   (near-free at that size, and the size tripwire alone cannot tell a legit
   tiny clip from garbage). `--stats FILE` (print_log_stats) is a standalone
   mode like `--check`; `--stats-live` wraps it in a mtime-poll redraw loop
@@ -104,6 +106,11 @@ ffmpeg (with libsvtav1), ffprobe, python3, awk, bc, numfmt, stat, mktemp
 - Audio codec is decided per-stream (`-c:a:N`); no global `-ac`, so multichannel
   layouts (5.1/7.1) keep their native channels. Non-standard layouts like
   `5.1(side)` are normalised via a per-stream `aformat` filter (libopus rejects them)
+- `--exclude`/`--ignore` (aliases) glob-match case-insensitively (`${x,,}` both
+  sides). `codec:NAME` patterns match the first video codec instead — they
+  `probe_load` lazily per candidate at collection time (single-slot cache, so
+  that probe is NOT reused at convert time); `x264`/`x265`/`h265` are aliased
+  to the ffprobe ids (`codec_alias`)
 - `--langs`/`--audio-langs`/`--sub-langs` filter tracks by language (via ffprobe
   index enumeration, since `-map 0:a:m:language:` is unreliable across ffmpeg builds);
   untagged/`und` tracks are always kept; a safety net keeps all audio if none match

@@ -139,7 +139,7 @@ Two safety guards run before each conversion: an **existing output** is skipped 
 | `--quality-check` | Sampled SSIM comparison after each encode; the output is rejected below the threshold (part of `--smart`) |
 | `--min-ssim VALUE` | SSIM rejection threshold, 0–1 (default: 0.92) |
 | `--ssim-samples N` | Evenly-spaced sample points for the check (default: 5) |
-| `--verify` | Fully decode each output before accepting it (catches corrupt bitstreams; costs one extra decode). Outputs under `--min-size` are always verified — a decode that small is free, and it proves a suspiciously tiny file is real video, not garbage |
+| `--verify` | Fully decode each output before accepting it (catches corrupt bitstreams; costs one extra decode). Outputs under 128K are always verified — a decode that small is free, and it proves a suspiciously tiny file is real video, not garbage |
 
 **Reading SSIM scores — the scale is content-dependent.** SSIM saturates on flat, clean content: 2D animation routinely scores 0.99+ for a good encode, but even a visibly trashed one still lands around 0.985 — while grainy live-action film sits at 0.93–0.96 for the *same* perceived quality. Don't compare scores across content types, and don't read 0.99 as "extra headroom": the default 0.92 threshold is deliberately a catastrophe tripwire (corrupt stream, broken colorspace), not a fine-quality gate. For fine quality, trust the size-based guards and your eyes.
 
@@ -167,8 +167,8 @@ All presets use 10-bit encoding, enable-overlays, and scene-change detection. Fi
 | `-r, --recursive` | Recurse into subdirectories |
 | `--sort-by-size [asc\|desc]` | Sort files by size before processing (default: desc) |
 | `--sort-by-date [asc\|desc]` | Sort files by mtime before processing (default: desc = newest first); mutually exclusive with `--sort-by-size`, last wins |
-| `--min-size SIZE` | Minimum plausible video size (default: `128K`; `0` disables). One threshold, three guards: smaller inputs are skipped, smaller outputs are decode-verified, and an output under `min(SIZE, input/10)` is flagged corrupt |
-| `--exclude PATTERN` | Exclude files matching glob pattern (repeatable) |
+| `--min-size SIZE` | Skip inputs smaller than SIZE (default: `128K`; `0` disables). Purely an input filter — output sanity (corrupt-output detection, forced verify) uses a fixed internal 128K threshold |
+| `--exclude PATTERN`, `--ignore PATTERN` | Exclude files matching glob pattern, case-insensitive (repeatable); `codec:NAME` excludes by video codec (`codec:x265` = hevc) |
 | `--skip-log[=FILE]` | Record files not worth converting and skip them on re-runs |
 | `--dry-run` | Preview without converting — shows the same per-file stream table (incl. per-track decisions) as a real run |
 | `--no-early-abort` | Disable early abort when output is estimated larger |
@@ -327,7 +327,7 @@ flowchart TD
 5. **Select tracks** — keeps all streams by default, or filters audio/subtitles by language; only the first video stream is encoded to AV1 while cover-art/thumbnail streams are copied verbatim
 6. **Encode** — runs FFmpeg with SVT-AV1 (per-stream audio codec), piping progress to a real-time monitor
 7. **Early abort** — at the configured threshold (default 15%), estimates final output size; aborts if it would be larger than input (only when `--smart` or `--rm-if-bigger`)
-8. **Post-process** — handles smart mode logic, source removal, in-place file swap; detects corrupt outputs (below `min(--min-size, input/10)`, plus a full decode — forced for sub-`--min-size` outputs, everywhere with `--verify`)
+8. **Post-process** — handles smart mode logic, source removal, in-place file swap; detects corrupt outputs (below `min(128K, input/10)`, plus a full decode — forced for sub-128K outputs, everywhere with `--verify`)
 9. **Summary** — prints a table of all results with sizes and savings
 
 ## Example output

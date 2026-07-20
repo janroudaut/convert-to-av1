@@ -64,9 +64,11 @@ copy_streams=false  # remux only (no re-encode), just strip/keep selected tracks
 use_profiles=true   # honor per-directory .convert-profile files
 audio_mode="auto"  # copy, opus, auto
 audio_bitrate_threshold=200  # kb/s — auto mode re-encodes above this
-# One threshold, three guards: inputs below it are skipped, an output below
-# min(min_size, input/10) is corrupt, an output below it gets a forced decode check.
-min_size=131072  # bytes (--min-size, 0 disables)
+min_size=131072  # bytes — input filter only (--min-size, 0 disables)
+# Output sanity is deliberately NOT tied to --min-size: an output below
+# min(SANITY_SIZE, input/10) is corrupt, one below SANITY_SIZE gets a forced
+# decode check — raising the input filter must not loosen these guardrails.
+readonly SANITY_SIZE=131072
 exclude_patterns=()
 skip_log_enabled=false  # persist quality-check failures and skip them on re-runs
 skip_log_file=""        # path to the failure log (empty = default at -r root)
@@ -322,7 +324,8 @@ apply_profile_tokens() {
                            fi
                            shift "$n" ;;
             --no-merge-subs) merge_subs=false; shift ;;
-            --exclude)     profile_str "$1" "${2:-}" && exclude_patterns+=("$2"); shift "$n" ;;
+            --exclude|--ignore)
+                           profile_str "$1" "${2:-}" && exclude_patterns+=("$2"); shift "$n" ;;
             --min-size)    cli_set min_size \
                                || { profile_size "$1" "${2:-}" && min_size=$(parse_size "$2"); }
                            shift "$n" ;;
@@ -512,13 +515,31 @@ parse_size() {
     awk -v n="$num" -v m="$mult" 'BEGIN { printf "%.0f", n * m }'
 }
 
+# Encoder names people actually type → codec ids ffprobe reports
+codec_alias() {
+    case "${1,,}" in
+        x264|h264|avc)  echo "h264" ;;
+        x265|h265)      echo "hevc" ;;
+        *)              echo "${1,,}" ;;
+    esac
+}
+
 is_excluded() {
     local filename="$1"
-    local base
+    local base pattern
     base=$(basename "$filename")
+    base=${base,,}
     for pattern in "${exclude_patterns[@]+"${exclude_patterns[@]}"}"; do
-        # shellcheck disable=SC2254
-        case "$base" in $pattern) return 0 ;; esac
+        if [[ "$pattern" == codec:* ]]; then
+            # Costs one probe per candidate at collection time — only when the
+            # user opts into a codec: pattern (cache is single-slot, no reuse)
+            probe_load "$filename"
+            [[ -n "$PROBE_V0_CODEC" && "$PROBE_V0_CODEC" == "$(codec_alias "${pattern#codec:}")" ]] \
+                && return 0
+        else
+            # shellcheck disable=SC2254
+            case "$base" in ${pattern,,}) return 0 ;; esac
+        fi
     done
     return 1
 }
@@ -1478,6 +1499,15 @@ check_dependencies() {
         die "Missing dependencies: ${missing[*]}"
     fi
 
+    # Not needed for a pure remux — --copy-streams must work on any ffmpeg.
+    # Captured first: grep -q on the pipe would SIGPIPE ffmpeg under pipefail
+    if ! $copy_streams; then
+        local encoders
+        encoders=$(ffmpeg -encoders 2>/dev/null || true)
+        [[ "$encoders" == *libsvtav1* ]] \
+            || die "ffmpeg was built without SVT-AV1 support (libsvtav1) — see --check"
+    fi
+
     debug "ffmpeg: $(ffmpeg -version | head -1)"
 }
 
@@ -1572,10 +1602,11 @@ BATCH:
                                 desc = newest first); mutually exclusive, last wins
   --dry-run                     Show what would be done without converting
   -r, --recursive               Recurse into subdirectories
-  --min-size SIZE               Minimum plausible video size (default: 128K;
-                                0 disables). Smaller inputs are skipped; smaller
-                                outputs are decode-verified or flagged corrupt
-  --exclude PATTERN             Exclude files matching glob PATTERN (repeatable)
+  --min-size SIZE               Skip inputs smaller than SIZE (default: 128K;
+                                0 disables). Output sanity checks stay on a
+                                fixed internal 128K threshold regardless
+  --exclude, --ignore PATTERN   Exclude files matching glob PATTERN, case-insensitive (repeatable)
+                                codec:NAME excludes by video codec (codec:x265 = hevc, codec:x264 = h264)
   --skip-log[=FILE]             Log files not worth converting (low SSIM / output
                                 larger) and skip them on re-runs. Default FILE:
                                 .convert-skip.list at the input root
@@ -1785,7 +1816,7 @@ parse_args() {
                 CLI_EXPLICIT[min_size]=1
                 shift 2
                 ;;
-            --exclude)
+            --exclude|--ignore)
                 need_arg "$1" "${2:-}"
                 exclude_patterns+=("$2")
                 shift 2
@@ -2918,10 +2949,10 @@ post_process() {
         return 0
     fi
 
-    # Corrupt-output tripwire: min(min_size, input/10), hard floor 1K — the cap
-    # keeps tiny-but-valid clips from being misflagged
+    # Corrupt-output tripwire: min(SANITY_SIZE, input/10), hard floor 1K — the
+    # cap keeps tiny-but-valid clips from being misflagged
     local min_output_size=$(( input_size / 10 ))
-    [[ "$min_output_size" -gt "$min_size" ]] && min_output_size="$min_size"
+    [[ "$min_output_size" -gt "$SANITY_SIZE" ]] && min_output_size="$SANITY_SIZE"
     [[ "$min_output_size" -lt 1024 ]] && min_output_size=1024
     if [[ "$output_size" -lt "$min_output_size" ]]; then
         warn "Output too small (${output_size} bytes), likely corrupt: $final_output"
@@ -2955,10 +2986,10 @@ post_process() {
     fi
 
     # Full decode (-xerror = fail on first decode error). Forced on outputs
-    # below min_size: near-free at that size, and the size tripwire alone
+    # below SANITY_SIZE: near-free at that size, and the size tripwire alone
     # cannot tell a legit tiny clip from garbage.
     local force_verify=false
-    [[ "$min_size" -gt 0 && "$output_size" -lt "$min_size" ]] && force_verify=true
+    [[ "$output_size" -lt "$SANITY_SIZE" ]] && force_verify=true
     if $verify_output || $force_verify; then
         if $force_verify && ! $verify_output; then
             info "  Output is small ($(human_size "$output_size")) — verifying (full decode)..."
